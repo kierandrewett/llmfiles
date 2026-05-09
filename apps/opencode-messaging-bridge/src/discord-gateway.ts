@@ -110,13 +110,14 @@ export class DiscordGatewayRunner {
                 }
                 settled = true;
                 this.clearHeartbeat();
-                this.activeSocket = null;
                 if ("error" in result) {
-                    this.activeSocket?.close(GATEWAY_CLOSE_RECONNECT, "discord gateway handler error");
+                    socket.close(GATEWAY_CLOSE_RECONNECT, "discord gateway handler error");
+                    this.activeSocket = null;
                     reject(result.error);
                     return;
                 }
 
+                this.activeSocket = null;
                 resolve(result.value);
             };
 
