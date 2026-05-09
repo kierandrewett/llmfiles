@@ -36,8 +36,9 @@ These are the source-backed facts the design relies on.
   Source: https://opencode.ai/docs/sdk/
 - OpenCode session APIs cover list, create, update, messages, async prompt, abort, and permission response flows.
   Source: https://opencode.ai/docs/sdk/ and local SDK types from `@opencode-ai/sdk@1.3.17`.
-- OpenCode event subscription is available as a server-sent events stream. The bridge should use typed `message.part.updated` events for transcript output rather than raw deltas where possible.
-  Source: https://opencode.ai/docs/sdk/
+- OpenCode event subscription is available as a server-sent events stream at `GET /event`. The bridge should use typed
+  `message.part.updated` events for transcript output rather than raw deltas where possible.
+  Source: https://opencode.ai/docs/server/ and https://opencode.ai/docs/sdk/
 - Telegram Bot API is HTTP-based. Bots can receive updates by either `getUpdates` long polling or webhooks, and the two modes are mutually exclusive.
   Source: https://core.telegram.org/bots/api#getting-updates
 - Telegram `getUpdates` uses a durable `offset`; to avoid duplicate updates the client recalculates the offset after every server response.
@@ -369,8 +370,8 @@ Verification:
 ### Phase 2: Telegram inbound and outbound MVP
 
 Current status: Telegram long polling, allowlist checks, command responses, session binding, session creation, prompt
-sends, and abort commands are implemented in `apps/opencode-messaging-bridge/`. The remaining Phase 2 gap is relaying
-OpenCode assistant output for bound sessions back to Telegram.
+sends, abort commands, and assistant text relay from OpenCode server-sent events are implemented in
+`apps/opencode-messaging-bridge/`. The remaining Phase 2 gaps are live smoke testing and polishing output fidelity.
 
 Acceptance criteria:
 
@@ -435,12 +436,12 @@ Verification:
 
 ## Next steps
 
-Phase 1 and the Telegram inbound command slice now live in `llmfiles/apps/opencode-messaging-bridge/`. The next
-implementation step is to complete Telegram output fidelity:
+Phase 1 and the Telegram inbound/output command slice now live in `llmfiles/apps/opencode-messaging-bridge/`. The next
+implementation step is to harden Telegram output fidelity:
 
-- subscribe to OpenCode server-sent events
-- relay bound session assistant output back through `sendMessage`
-- coalesce noisy `message.part.updated` bursts before posting to Telegram
+- smoke test the continuous `telegram` command against a real local `opencode serve` and private Telegram chat
+- decide whether reasoning parts should be sent by default or gated behind a config flag
+- add compact handling for session errors and important failed tool events
 - keep permission request commands deferred to Phase 3 unless the OpenCode event slice exposes a clean endpoint during
   implementation
 

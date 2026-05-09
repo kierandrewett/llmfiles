@@ -1,8 +1,10 @@
 import { pathToFileURL } from "node:url";
 
 import { type Env, loadBridgeConfig } from "./config.js";
+import { OpenCodeEventPump } from "./opencode-event-pump.js";
 import { OpenCodeHttpClient, type OpenCodeHealth, type OpenCodeSession } from "./opencode.js";
 import { loadOrCreateBridgeState } from "./state.js";
+import { TelegramEventRelay } from "./telegram-event-relay.js";
 import { TelegramBridgePoller } from "./telegram-poller.js";
 import { TelegramBridgeRouter } from "./telegram-router.js";
 import { TelegramBotApiClient } from "./telegram.js";
@@ -22,9 +24,14 @@ export interface CliDependencies {
     stderr?: (line: string) => void;
     client?: OpenCodeClientLike;
     telegramPoller?: TelegramPollerLike;
+    eventPump?: OpenCodeEventPumpLike;
 }
 
 export interface TelegramPollerLike {
+    runOnce(): Promise<number>;
+}
+
+export interface OpenCodeEventPumpLike {
     runOnce(): Promise<number>;
 }
 
@@ -51,7 +58,10 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
         }
 
         if (command === "telegram") {
-            await runTelegramLoop(telegramPoller(config, dependencies), stdout, stderr);
+            await Promise.all([
+                runTelegramLoop(telegramPoller(config, dependencies), stdout, stderr),
+                runOpenCodeEventLoop(openCodeEventPump(config, dependencies), stdout, stderr),
+            ]);
             return 0;
         }
 
@@ -112,18 +122,40 @@ function telegramPoller(
     config: ReturnType<typeof loadBridgeConfig>,
     dependencies: CliDependencies,
 ): TelegramPollerLike {
-    if (!config.telegram.enabled || !config.telegram.botToken) {
-        throw new Error(TELEGRAM_DISABLED_MESSAGE);
-    }
+    const botToken = telegramBotToken(config);
     if (dependencies.telegramPoller) {
         return dependencies.telegramPoller;
     }
 
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
-    const telegram = new TelegramBotApiClient({ botToken: config.telegram.botToken });
+    const telegram = new TelegramBotApiClient({ botToken });
     const router = new TelegramBridgeRouter({ config, opencode, telegram });
 
     return new TelegramBridgePoller({ statePath: config.statePath, telegram, router });
+}
+
+function openCodeEventPump(
+    config: ReturnType<typeof loadBridgeConfig>,
+    dependencies: CliDependencies,
+): OpenCodeEventPumpLike {
+    const botToken = telegramBotToken(config);
+    if (dependencies.eventPump) {
+        return dependencies.eventPump;
+    }
+
+    const source = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
+    const telegram = new TelegramBotApiClient({ botToken });
+    const handler = new TelegramEventRelay({ statePath: config.statePath, telegram });
+
+    return new OpenCodeEventPump({ source, handler });
+}
+
+function telegramBotToken(config: ReturnType<typeof loadBridgeConfig>): string {
+    if (!config.telegram.enabled || !config.telegram.botToken) {
+        throw new Error(TELEGRAM_DISABLED_MESSAGE);
+    }
+
+    return config.telegram.botToken;
 }
 
 async function runTelegramLoop(
@@ -142,6 +174,26 @@ async function runTelegramLoop(
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             stderr(`[bridge] telegram polling failed: ${message}`);
+            await delay(5000);
+        }
+    }
+}
+
+async function runOpenCodeEventLoop(
+    pump: OpenCodeEventPumpLike,
+    stdout: (line: string) => void,
+    stderr: (line: string) => void,
+): Promise<never> {
+    stdout("[bridge] opencode event relay started");
+
+    for (;;) {
+        try {
+            const processed = await pump.runOnce();
+            stdout(`[bridge] opencode event stream ended after ${processed} event(s); reconnecting`);
+            await delay(1000);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            stderr(`[bridge] opencode event relay failed: ${message}`);
             await delay(5000);
         }
     }

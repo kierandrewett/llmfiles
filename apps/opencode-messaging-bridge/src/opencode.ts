@@ -41,6 +41,15 @@ export interface AbortSessionInput {
     directory?: string;
 }
 
+export interface OpenCodeEvent {
+    type: string;
+    properties: Record<string, unknown>;
+}
+
+export interface SubscribeEventsInput {
+    signal?: AbortSignal;
+}
+
 export class OpenCodeHttpError extends Error {
     readonly status: number;
     readonly body: string;
@@ -135,6 +144,27 @@ export class OpenCodeHttpClient {
                 directory: input.directory,
             },
         });
+    }
+
+    async subscribeEvents(input: SubscribeEventsInput = {}): Promise<AsyncIterable<OpenCodeEvent>> {
+        const requestInit: RequestInit = {
+            method: "GET",
+            headers: { accept: "text/event-stream" },
+        };
+        if (input.signal) {
+            requestInit.signal = input.signal;
+        }
+
+        const response = await this.fetcher(this.url("/event"), requestInit);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new OpenCodeHttpError(`OpenCode request failed with HTTP ${response.status}`, response.status, text);
+        }
+        if (!response.body) {
+            throw new Error("OpenCode event stream response did not include a body");
+        }
+
+        return parseOpenCodeEventStream(response.body);
     }
 
     private async requestJson(route: string, options: RequestOptions): Promise<unknown> {
@@ -245,4 +275,75 @@ function requireFiniteNumber(value: unknown, source: string): number {
     }
 
     return value;
+}
+
+async function* parseOpenCodeEventStream(stream: ReadableStream<Uint8Array>): AsyncIterable<OpenCodeEvent> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+                buffer += decoder.decode();
+                yield* parseCompleteSseBuffer(buffer);
+                return;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const split = splitCompleteSseBuffer(buffer);
+            buffer = split.remainder;
+            yield* parseCompleteSseBuffer(split.complete);
+        }
+    } finally {
+        reader.releaseLock();
+    }
+}
+
+function splitCompleteSseBuffer(buffer: string): { complete: string; remainder: string } {
+    const normalised = buffer.replace(/\r\n/g, "\n");
+    const lastBoundary = normalised.lastIndexOf("\n\n");
+    if (lastBoundary === -1) {
+        return { complete: "", remainder: normalised };
+    }
+
+    return {
+        complete: normalised.slice(0, lastBoundary + 2),
+        remainder: normalised.slice(lastBoundary + 2),
+    };
+}
+
+function* parseCompleteSseBuffer(buffer: string): Iterable<OpenCodeEvent> {
+    for (const block of buffer.split("\n\n")) {
+        const data = sseData(block);
+        if (!data) {
+            continue;
+        }
+
+        yield parseOpenCodeEventPayload(JSON.parse(data) as unknown);
+    }
+}
+
+function sseData(block: string): string | null {
+    const lines = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""));
+
+    return lines.length === 0 ? null : lines.join("\n");
+}
+
+function parseOpenCodeEventPayload(value: unknown): OpenCodeEvent {
+    const record = requireRecord(value, "OpenCode event payload");
+    const payload = isRecord(record.payload) ? record.payload : record;
+
+    return {
+        type: requireString(payload.type, "OpenCode event payload.type"),
+        properties: isRecord(payload.properties) ? payload.properties : {},
+    };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
 }

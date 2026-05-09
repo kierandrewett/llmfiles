@@ -87,6 +87,51 @@ describe("OpenCodeHttpClient", () => {
             (error) => error instanceof OpenCodeHttpError && error.status === 500 && error.body === '{"error":"nope"}',
         );
     });
+
+    it("subscribes to the OpenCode event stream", async () => {
+        const directEvent = { type: "server.connected", properties: {} };
+        const wrappedEvent = {
+            directory: "/tmp/project",
+            payload: {
+                type: "message.part.updated",
+                properties: {
+                    part: {
+                        id: "part_1",
+                        sessionID: "ses_abc",
+                        type: "text",
+                        text: "hello",
+                    },
+                },
+            },
+        };
+        const { client, requests } = createSseClient([
+            `event: server.connected\ndata: ${JSON.stringify(directEvent)}\n\n`,
+            `data: ${JSON.stringify(wrappedEvent)}\n\n`,
+        ].join(""));
+
+        const events = await client.subscribeEvents();
+        const received = [];
+        for await (const event of events) {
+            received.push(event);
+        }
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/event");
+        assert.equal(requests[0]?.init.method, "GET");
+        assert.deepEqual(received, [
+            { type: "server.connected", properties: {} },
+            {
+                type: "message.part.updated",
+                properties: {
+                    part: {
+                        id: "part_1",
+                        sessionID: "ses_abc",
+                        type: "text",
+                        text: "hello",
+                    },
+                },
+            },
+        ]);
+    });
 });
 
 interface CapturedRequest {
@@ -109,4 +154,29 @@ function createClient(responses: unknown[], status = 200): { client: OpenCodeHtt
         client: new OpenCodeHttpClient({ baseUrl: "http://127.0.0.1:4096", fetch: fetcher }),
         requests,
     };
+}
+
+function createSseClient(body: string): { client: OpenCodeHttpClient; requests: CapturedRequest[] } {
+    const requests: CapturedRequest[] = [];
+    const fetcher: typeof fetch = async (input, init = {}) => {
+        requests.push({ url: String(input), init });
+        return new Response(encodeStream(body), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+        });
+    };
+
+    return {
+        client: new OpenCodeHttpClient({ baseUrl: "http://127.0.0.1:4096", fetch: fetcher }),
+        requests,
+    };
+}
+
+function encodeStream(text: string): ReadableStream<Uint8Array> {
+    return new ReadableStream({
+        start(controller) {
+            controller.enqueue(new TextEncoder().encode(text));
+            controller.close();
+        },
+    });
 }

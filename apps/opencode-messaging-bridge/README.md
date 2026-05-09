@@ -11,9 +11,10 @@ This package implements the Phase 1 foundation and the first Telegram inbound sl
 - Telegram Bot API long polling and text responses
 - allowlisted Telegram command routing for `/oc status`, `/oc sessions`, `/oc attach`, `/oc new`, `/oc prompt`, and
   `/oc abort`
+- OpenCode server-sent event relay for bound Telegram sessions, currently for assistant text parts
 - CLI commands for checking the configured OpenCode server and running Telegram polling
 
-It does not start Discord or relay OpenCode assistant events back to Telegram yet.
+It does not start Discord or handle OpenCode permission replies from Telegram yet.
 
 ## Setup
 
@@ -55,8 +56,9 @@ yarn start telegram
 yarn check
 ```
 
-`telegram-once` processes one `getUpdates` response and exits. Use it for smoke tests and service debugging. `telegram`
-runs the same poller continuously and keeps the last committed Telegram `updateOffset` in the state file.
+`telegram-once` processes one `getUpdates` response and exits. Use it for inbound smoke tests and service debugging.
+`telegram` runs the same poller continuously and also subscribes to OpenCode server-sent events so bound session output
+can be sent back to Telegram.
 
 The state file defaults to:
 
