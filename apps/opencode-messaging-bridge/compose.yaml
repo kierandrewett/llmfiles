@@ -6,6 +6,7 @@ services:
         OPENCODE_VERSION: ${OPENCODE_VERSION:-}
     image: ${OPENCODE_BRIDGE_IMAGE:-opencode-messaging-bridge:local}
     container_name: ${OPENCODE_BRIDGE_CONTAINER_NAME:-opencode-bridge}
+    command: ["yarn", "start", "${OPENCODE_BRIDGE_COMMAND:-telegram}"]
     init: true
     restart: unless-stopped
     env_file:

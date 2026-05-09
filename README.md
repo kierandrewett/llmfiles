@@ -36,16 +36,17 @@ Existing real files are skipped. Existing symlinks are relinked.
 
 ## OpenCode remote control
 
-The standalone bridge can run in Docker Compose and let an allowlisted Telegram chat control an OpenCode session. Discord
-control currently uses the existing OpenCode plugin rather than the Docker bridge. Start with the package README:
+The standalone bridge can run in Docker Compose and let an allowlisted Telegram chat or Discord channel control an
+OpenCode session. Start with the package README:
 
 ```text
 apps/opencode-messaging-bridge/README.md
 ```
 
 The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth/config and the target repo at
-runtime, and stores Telegram offsets plus session bindings in a Docker volume. The Discord plugin setup lives in
-`plugins/opencode/discord-remote-control.md`.
+runtime, and stores Telegram offsets, Discord Gateway resume state, slash-command registration signatures, and session
+bindings in a Docker volume. The older Discord plugin still exists at `plugins/opencode/discord-remote-control.md` for
+plugin-specific features, but core Discord remote control now lives in the daemon.
 
 ## Sync notes
 

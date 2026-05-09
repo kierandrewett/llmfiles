@@ -1,6 +1,6 @@
 # OpenCode messaging bridge
 
-Standalone daemon for controlling OpenCode sessions from Telegram.
+Standalone daemon for controlling OpenCode sessions from Telegram or Discord.
 
 This package implements the Phase 1 foundation and the first Telegram inbound slice from
 `../../docs/opencode-messaging-bridge.md`:
@@ -9,13 +9,14 @@ This package implements the Phase 1 foundation and the first Telegram inbound sl
 - atomic JSON state storage
 - OpenCode HTTP client for health checks, session listing, session creation, prompt sends, and aborts
 - Telegram Bot API long polling and text responses
+- Discord Gateway, REST, slash-command, and prefix-command handling
 - allowlisted Telegram command routing for `/oc status`, `/oc sessions`, `/oc attach`, `/oc new`, `/oc prompt`, and
   `/oc abort`
-- OpenCode server-sent event relay for bound Telegram sessions, currently for assistant text parts
+- OpenCode server-sent event relay for bound Telegram and Discord sessions, currently for assistant text parts
 - optional OpenCode process supervision for `opencode serve`
-- CLI commands for checking the configured OpenCode server and running Telegram polling
+- CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
-It does not start Discord or handle OpenCode permission replies from Telegram yet.
+It does not handle OpenCode permission replies from Telegram or Discord yet.
 
 ## Contents
 
@@ -33,25 +34,28 @@ The Docker image runs one bridge process. By default that bridge starts `opencod
 connects to it on loopback.
 
 ```text
-Telegram app -> Telegram Bot API -> bridge container -> opencode serve
-                                                ^
-                                                |
-                                  mounted project/auth/config/state
+Telegram app -> Telegram Bot API ----\
+                                      bridge container -> opencode serve
+Discord app  -> Discord Gateway/API -/        ^
+                                               |
+                                 mounted project/auth/config/state
 ```
 
-No OpenCode HTTP port needs to be exposed. The container only needs outbound network access for Telegram and whichever
-model provider OpenCode uses. Telegram sends updates to the bot API, the bridge long-polls those updates, sends prompts to
-OpenCode, then relays assistant text back to the bound Telegram chat.
+No OpenCode HTTP port needs to be exposed. The container only needs outbound network access for the configured messaging
+platform and whichever model provider OpenCode uses. Telegram uses Bot API long polling. Discord uses a Gateway WebSocket
+for inbound messages and interactions, plus REST calls for responses. The bridge sends prompts to OpenCode, then relays
+assistant text back to the bound chat or channel.
 
 ## Control surface support
 
 | Surface | Runtime | Status |
 | --- | --- | --- |
 | Telegram | Standalone bridge app, Docker, or Docker Compose | Implemented here |
-| Discord | `plugins/opencode/discord-remote-control.ts` OpenCode plugin | Implemented as a plugin, not in this Docker daemon yet |
+| Discord | Standalone bridge app, Docker, or Docker Compose | Implemented here |
 
-Use Telegram for the always-on Docker bridge. Use Discord through the existing OpenCode plugin until the daemon gets a
-Discord adapter.
+The older `plugins/opencode/discord-remote-control.ts` plugin still exists and has extra plugin-specific behaviour such as
+session threads, forum intake, and permission replies. The standalone daemon is now the proper Docker/server path for core
+Discord control: `status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, and assistant text relay.
 
 ## Telegram setup
 
@@ -101,52 +105,50 @@ Expected result:
 
 ## Discord setup
 
-Discord control currently uses the OpenCode plugin, not this Docker bridge. That means Discord runs inside whichever
-OpenCode process loads `~/.config/opencode/plugins/discord-remote-control.ts`.
-
-Install the OpenCode profile and plugin links from the repo root:
-
-```bash
-just install-opencode-all
-```
-
 Create a Discord application and bot in the Discord Developer Portal, then invite the bot to a private control channel.
-Use these permissions as the baseline:
+Use the `bot` and `applications.commands` scopes. These bot permissions are enough for the daemon path:
 
 - `Read Messages/View Channels`
 - `Send Messages`
 - `Read Message History`
 - `Use Slash Commands`
-- `Create Public Threads` or `Create Private Threads` if session threads are enabled
-- `Manage Threads` if the plugin should rename or tag session threads
 
-Enable the Message Content privileged intent only if you want prefix commands or plain-text replies in guild channels.
-Slash commands and DMs reduce the need for that intent.
+Leave the application's Interactions Endpoint URL empty if you want slash commands delivered over the Gateway. Discord's
+Gateway and outgoing-webhook interaction delivery modes are mutually exclusive.
 
-Set the required Discord environment before starting OpenCode:
+Enable the Message Content privileged intent only if you want `!oc ...` prefix commands or plain-text replies in guild
+channels. Slash commands do not need that privileged intent. If you enable it in the Developer Portal, also set
+`OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in the bridge env.
+
+Set the required Discord environment before starting the bridge:
 
 ```bash
-export OPENCODE_DISCORD_BOT_TOKEN="replace-with-real-token"
-export OPENCODE_DISCORD_CHANNEL_ID="123456789012345678"
-export OPENCODE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_BOT_TOKEN="replace-with-real-token"
+export OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
 ```
 
 Useful optional settings:
 
 ```bash
-export OPENCODE_DISCORD_APPLICATION_ID="123456789012345678"
-export OPENCODE_DISCORD_GUILD_ID="123456789012345678"
-export OPENCODE_DISCORD_SLASH_COMMANDS="1"
-export OPENCODE_DISCORD_REGISTER_SLASH_COMMANDS="1"
-export OPENCODE_DISCORD_SLASH_EPHEMERAL="1"
-export OPENCODE_DISCORD_SESSION_THREADS="0"
-export OPENCODE_DISCORD_IMPLICIT_REPLY="0"
+export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
+export OPENCODE_BRIDGE_DISCORD_SLASH_COMMAND="oc"
+export OPENCODE_BRIDGE_DISCORD_PREFIX="!oc"
+export OPENCODE_BRIDGE_DISCORD_SLASH_EPHEMERAL="1"
+export OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT="0"
+export OPENCODE_BRIDGE_IMPLICIT_REPLY="0"
 ```
 
-Start OpenCode normally after those variables are set:
+`OPENCODE_BRIDGE_DISCORD_GUILD_ID` makes command registration guild-scoped, which updates quickly and is better while
+testing. If it is unset, registration is global and Discord may take longer to show the command. The daemon caches the
+registered command signature in bridge state so normal reconnects do not repeatedly upsert the command.
+
+Start the local Discord daemon after those variables are set:
 
 ```bash
-opencode
+yarn start discord
 ```
 
 Then smoke test from Discord:
@@ -159,7 +161,22 @@ Then smoke test from Discord:
 /oc abort
 ```
 
-More plugin-specific details live in `../../plugins/opencode/discord-remote-control.md`.
+If you enabled `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1`, prefix commands work too:
+
+```text
+!oc status
+!oc new Discord daemon smoke test
+!oc prompt what repository are you running in?
+```
+
+Expected result:
+
+- `/oc status` reports OpenCode health and the active Discord channel session.
+- `/oc new` creates and binds a session to that Discord channel.
+- `/oc prompt` sends text to the bound OpenCode session.
+- Assistant text is relayed back into Discord from the OpenCode event stream.
+
+Plugin-specific details for the older OpenCode plugin live in `../../plugins/opencode/discord-remote-control.md`.
 
 ## Local setup
 
@@ -203,6 +220,17 @@ export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS="12345"
 export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS="12345" # optional, but recommended
 ```
 
+For Discord, set the bot token, control channel, and allowlisted users instead:
+
+```bash
+export OPENCODE_BRIDGE_DISCORD_BOT_TOKEN="..."
+export OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678" # needed for slash registration before READY
+export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"       # optional, but useful while testing
+export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
+```
+
 ## Commands
 
 ```bash
@@ -211,12 +239,18 @@ yarn start sessions
 yarn start new "Session title"
 yarn start telegram-once
 yarn start telegram
+yarn start discord-once
+yarn start discord
 yarn check
 ```
 
 `telegram-once` processes one `getUpdates` response and exits. Use it for inbound smoke tests and service debugging.
 `telegram` runs the same poller continuously and also subscribes to OpenCode server-sent events so bound session output
 can be sent back to Telegram.
+
+`discord-once` connects to the Discord Gateway once and exits when the socket closes. Use it for debugging Gateway and
+slash-command setup. `discord` reconnects continuously and also subscribes to OpenCode server-sent events so bound session
+output can be sent back to Discord.
 
 The state file defaults to:
 
@@ -248,7 +282,7 @@ docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge
 
 ### Docker Compose
 
-Docker Compose is the preferred server path for the Telegram bridge.
+Docker Compose is the preferred server path for the Telegram or Discord bridge.
 
 Copy the Compose interpolation example and edit the host paths:
 
@@ -265,14 +299,25 @@ cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
 $EDITOR "$HOME/.config/opencode-messaging-bridge/env"
 ```
 
+Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run:
+
+```bash
+OPENCODE_BRIDGE_COMMAND=discord
+# or
+OPENCODE_BRIDGE_COMMAND=telegram
+```
+
+In the runtime env file, remove the token block for the surface you are not running. The example shows both blocks so the
+available keys are visible, not because both are required.
+
 Check the Compose shape with the example env before using real tokens:
 
 ```bash
 OPENCODE_BRIDGE_RUNTIME_ENV_FILE=./bridge.env.example docker compose --env-file .env.example config
 ```
 
-Do not run `docker compose config` against the real runtime env unless you are happy for the Telegram bot token to appear
-in your terminal scrollback.
+Do not run `docker compose config` against the real runtime env unless you are happy for bot tokens to appear in your
+terminal scrollback.
 
 Start the bridge:
 
@@ -302,9 +347,12 @@ $EDITOR "$HOME/.config/opencode-messaging-bridge/env"
 Use this shape:
 
 ```bash
-OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token
-OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS=123456789
-OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS=123456789
+OPENCODE_BRIDGE_DISCORD_BOT_TOKEN=replace-with-real-token
+OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID=123456789012345678
+OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS=123456789012345678
+OPENCODE_BRIDGE_DISCORD_APPLICATION_ID=123456789012345678
+OPENCODE_BRIDGE_DISCORD_GUILD_ID=123456789012345678
+OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS=1
 OPENCODE_BRIDGE_MANAGE_OPENCODE=1
 OPENCODE_BRIDGE_OPENCODE_HOST=127.0.0.1
 OPENCODE_BRIDGE_OPENCODE_PORT=4096
@@ -322,7 +370,8 @@ docker run -d \
   -v "$HOME/.config/opencode:/home/node/.config/opencode:ro" \
   -v "/home/kieran/dev/lifeos-scrubbed:/workspace/project" \
   -v opencode-bridge-state:/state \
-  opencode-messaging-bridge
+  opencode-messaging-bridge \
+  yarn start discord
 ```
 
 Replace `/home/kieran/dev/lifeos-scrubbed` with the repo you want OpenCode to control. The path inside the container must
@@ -335,7 +384,8 @@ docker logs -f opencode-bridge
 ```
 
 The bridge state lives in the `opencode-bridge-state` Docker volume because the image sets `XDG_STATE_HOME=/state`.
-That state stores Telegram offsets and chat-to-session bindings. It must not contain bot tokens or OpenCode credentials.
+That state stores Telegram offsets, Discord Gateway resume metadata, slash-command registration signatures, and
+chat/channel-to-session bindings. It must not contain bot tokens or OpenCode credentials.
 
 OpenCode provider credentials are separate. OpenCode stores credentials created through `/connect` in
 `~/.local/share/opencode/auth.json`, so ChatGPT Plus/Pro and OpenCode Go credentials should be prepared on the host and
@@ -364,4 +414,4 @@ docker rm -f opencode-bridge
 ```
 
 Do not publish `4096` from the container unless the bridge gains OpenCode basic-auth client support. For now, keep
-OpenCode on `127.0.0.1` inside the container and let Telegram be the only remote control surface.
+OpenCode on `127.0.0.1` inside the container and let Telegram or Discord be the remote control surface.
