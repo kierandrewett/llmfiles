@@ -81,6 +81,31 @@ describe("DiscordEventRelay", () => {
             },
         ]);
     });
+
+    it("relays low-noise tool state changes once per state", async () => {
+        const fixture = await createFixture();
+        const relay = new DiscordEventRelay({ statePath: fixture.statePath, discord: fixture.discord });
+
+        await relay.handleEvent(toolEvent("ses_abc", "tool_1", "bash", "running", "git status"));
+        await relay.handleEvent(toolEvent("ses_abc", "tool_1", "bash", "running", "git status"));
+        await relay.handleEvent(toolEvent("ses_abc", "tool_1", "bash", "completed", "git status"));
+
+        assert.deepEqual(fixture.discord.messages.map((message) => message.content), [
+            "[bridge] tool started: bash\n[bridge] detail: git status",
+            "[bridge] tool completed: bash\n[bridge] detail: git status",
+        ]);
+    });
+
+    it("relays session errors to Discord bindings", async () => {
+        const fixture = await createFixture();
+        const relay = new DiscordEventRelay({ statePath: fixture.statePath, discord: fixture.discord });
+
+        await relay.handleEvent(sessionErrorEvent("ses_abc"));
+
+        assert.deepEqual(fixture.discord.messages.map((message) => message.content), [
+            "[bridge] session error\n[bridge] session: ses_abc\n[bridge] error: ProviderAuthError: missing API key",
+        ]);
+    });
 });
 
 async function createFixture(): Promise<{
@@ -151,6 +176,43 @@ function permissionEvent(sessionID: string): OpenCodeEvent {
             title: "Run bash command",
             metadata: {},
             time: { created: 1 },
+        },
+    };
+}
+
+function toolEvent(sessionID: string, partID: string, tool: string, status: "running" | "completed", title: string): OpenCodeEvent {
+    return {
+        type: "message.part.updated",
+        properties: {
+            part: {
+                id: partID,
+                sessionID,
+                messageID: "msg_1",
+                type: "tool",
+                callID: "call_1",
+                tool,
+                state: {
+                    status,
+                    title,
+                    input: {},
+                    output: "",
+                    metadata: {},
+                    time: { start: 1, end: status === "completed" ? 2 : undefined },
+                },
+            },
+        },
+    };
+}
+
+function sessionErrorEvent(sessionID: string): OpenCodeEvent {
+    return {
+        type: "session.error",
+        properties: {
+            sessionID,
+            error: {
+                name: "ProviderAuthError",
+                data: { message: "missing API key" },
+            },
         },
     };
 }
