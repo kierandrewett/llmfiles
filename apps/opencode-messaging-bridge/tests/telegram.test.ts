@@ -84,6 +84,31 @@ describe("TelegramBotApiClient", () => {
         assert.deepEqual(sent, { messageID: 10 });
     });
 
+    it("creates forum topics and normalises the returned thread ID", async () => {
+        const { client, requests } = createClient([
+            {
+                ok: true,
+                result: {
+                    message_thread_id: 777,
+                    name: "New work",
+                    icon_color: 7322096,
+                },
+            },
+        ]);
+
+        const topic = await client.createForumTopic({ chatID: "-100123", name: "New work" });
+
+        assert.equal(requests[0]?.method, "createForumTopic");
+        assert.deepEqual(requests[0]?.body, { chat_id: "-100123", name: "New work" });
+        assert.deepEqual(topic, {
+            messageThreadID: "777",
+            name: "New work",
+            iconColor: 7322096,
+            iconCustomEmojiID: null,
+            isNameImplicit: false,
+        });
+    });
+
     it("streams private chat drafts", async () => {
         const { client, requests } = createClient([{ ok: true, result: true }]);
 

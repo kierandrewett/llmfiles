@@ -10,9 +10,11 @@ import { readBridgeState, writeBridgeState, createDefaultBridgeState } from "../
 import { TelegramBridgeRouter } from "../src/telegram-router.js";
 import {
     TELEGRAM_MARKDOWN_PARSE_MODE,
+    type CreateForumTopicInput,
     type SendChatActionInput,
     type SendMessageInput,
     type SetMessageReactionInput,
+    type TelegramForumTopic,
     type TelegramUpdate,
 } from "../src/telegram.js";
 
@@ -90,6 +92,46 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* created and attached `ses_new` New work"]);
     });
 
+    it("creates a Telegram topic for a new session when topic creation is enabled", async () => {
+        const fixture = await createFixture({
+            createTopics: true,
+            createdSession: { id: "ses_new", title: "New work", directory: null, time: null },
+            topic: { messageThreadID: "777", name: "New work", iconColor: 7322096, iconCustomEmojiID: null, isNameImplicit: false },
+        });
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc new New work", null, "supergroup"));
+
+        const state = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.telegram.topics, [{ chatID: "456", name: "New work" }]);
+        assert.equal(state.surfaces[0]?.id, "telegram:456:777");
+        assert.equal(state.surfaces[0]?.surface.threadID, "777");
+        assert.equal(state.surfaces[0]?.activeSessionID, "ses_new");
+        assert.equal(state.bindings[0]?.surface.threadID, "777");
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.threadID), ["777"]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* created and attached `ses_new` New work"]);
+    });
+
+    it("falls back to the current Telegram surface when topic creation fails", async () => {
+        const fixture = await createFixture({
+            createTopics: true,
+            failTopicCreation: true,
+            createdSession: { id: "ses_new", title: "New work", directory: null, time: null },
+        });
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc new New work", null, "supergroup"));
+
+        const state = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.telegram.topics, [{ chatID: "456", name: "New work" }]);
+        assert.equal(state.surfaces[0]?.id, "telegram:456:");
+        assert.equal(state.surfaces[0]?.surface.threadID, null);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.threadID), [null]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
+            "*\\[bridge\\]* created and attached `ses_new` New work\n*\\[bridge\\]* topic creation failed; bound this chat instead",
+        ]);
+    });
+
     it("sends prompts to the active session", async () => {
         const fixture = await createFixture();
         const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
@@ -128,6 +170,9 @@ describe("TelegramBridgeRouter", () => {
 interface FixtureOptions {
     sessions?: OpenCodeSession[];
     createdSession?: OpenCodeSession;
+    createTopics?: boolean;
+    topic?: TelegramForumTopic;
+    failTopicCreation?: boolean;
     failReactions?: boolean;
 }
 
@@ -146,7 +191,12 @@ interface FakeOpenCode {
 async function createFixture(options: FixtureOptions = {}): Promise<{
     statePath: string;
     dependencies: ConstructorParameters<typeof TelegramBridgeRouter>[0];
-    telegram: { messages: SendMessageInput[]; actions: SendChatActionInput[]; reactions: SetMessageReactionInput[] };
+    telegram: {
+        messages: SendMessageInput[];
+        actions: SendChatActionInput[];
+        reactions: SetMessageReactionInput[];
+        topics: CreateForumTopicInput[];
+    };
     opencode: FakeOpenCode;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-router-test-"));
@@ -156,6 +206,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         messages: [] as SendMessageInput[],
         actions: [] as SendChatActionInput[],
         reactions: [] as SetMessageReactionInput[],
+        topics: [] as CreateForumTopicInput[],
         async sendMessage(input: SendMessageInput): Promise<void> {
             telegram.messages.push(input);
         },
@@ -168,6 +219,14 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             }
 
             telegram.reactions.push(input);
+        },
+        async createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic> {
+            telegram.topics.push(input);
+            if (options.failTopicCreation) {
+                throw new Error("topic creation failed");
+            }
+
+            return options.topic ?? { messageThreadID: "777", name: input.name, iconColor: 7322096, iconCustomEmojiID: null, isNameImplicit: false };
         },
     };
     const opencode: FakeOpenCode = {
@@ -199,7 +258,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     return {
         statePath,
         dependencies: {
-            config: bridgeConfig(statePath),
+            config: bridgeConfig(statePath, options),
             telegram,
             opencode,
             now: () => new Date("2026-05-09T00:00:00.000Z"),
@@ -209,7 +268,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     };
 }
 
-function bridgeConfig(statePath: string): BridgeConfig {
+function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeConfig {
     return {
         opencode: {
             baseUrl: "http://127.0.0.1:4096",
@@ -229,6 +288,7 @@ function bridgeConfig(statePath: string): BridgeConfig {
             botToken: "bot-token",
             allowedUserIDs: ["123"],
             allowedChatIDs: [],
+            createTopics: options.createTopics ?? false,
         },
         discord: {
             enabled: false,
@@ -247,7 +307,7 @@ function bridgeConfig(statePath: string): BridgeConfig {
     };
 }
 
-function update(userID: string, chatID: string, text: string, threadID: string | null = null): TelegramUpdate {
+function update(userID: string, chatID: string, text: string, threadID: string | null = null, chatType?: string): TelegramUpdate {
     return {
         updateID: 1,
         message: {
@@ -255,6 +315,7 @@ function update(userID: string, chatID: string, text: string, threadID: string |
             threadID,
             userID,
             chatID,
+            chatType,
             text,
         },
     };

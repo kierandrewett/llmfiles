@@ -84,6 +84,7 @@ describe("loadBridgeConfig", () => {
             OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN: "telegram-token",
             OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS: "123, 456",
             OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS: "999",
+            OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS: "1",
             OPENCODE_BRIDGE_DISCORD_BOT_TOKEN: "discord-token",
             OPENCODE_BRIDGE_DISCORD_APPLICATION_ID: "app-id",
             OPENCODE_BRIDGE_DISCORD_GUILD_ID: "guild-id",
@@ -101,6 +102,7 @@ describe("loadBridgeConfig", () => {
         assert.equal(config.implicitReply, true);
         assert.deepEqual(config.telegram.allowedUserIDs, ["123", "456"]);
         assert.deepEqual(config.telegram.allowedChatIDs, ["999"]);
+        assert.equal(config.telegram.createTopics, true);
         assert.equal(config.telegram.enabled, true);
         assert.deepEqual(config.discord.allowedUserIDs, ["abc", "def"]);
         assert.equal(config.discord.applicationID, "app-id");
