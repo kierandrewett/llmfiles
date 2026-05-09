@@ -1,5 +1,10 @@
 import { loadOrCreateBridgeState, readBridgeState, writeBridgeState } from "./state.js";
-import { TELEGRAM_BRIDGE_BOT_COMMANDS, type GetUpdatesOptions, type SetMyCommandsInput, type TelegramUpdate } from "./telegram.js";
+import {
+    TELEGRAM_BRIDGE_BOT_COMMANDS,
+    type GetUpdatesOptions,
+    type SetMyCommandsInput,
+    type TelegramUpdate,
+} from "./telegram.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
 

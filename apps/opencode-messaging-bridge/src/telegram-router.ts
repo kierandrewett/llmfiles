@@ -111,7 +111,10 @@ export class TelegramBridgeRouter {
             return;
         }
 
-        await this.send(message, bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, or /oc prompt."));
+        await this.send(
+            message,
+            bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, or /oc prompt."),
+        );
         await this.react(message, TELEGRAM_REACTION_UNKNOWN);
     }
 
@@ -145,7 +148,9 @@ export class TelegramBridgeRouter {
             return;
         }
 
-        const session = target === "latest" ? await this.latestSession() : await this.opencode.getSession({ sessionID: target });
+        const session = target === "latest"
+            ? await this.latestSession()
+            : await this.opencode.getSession({ sessionID: target });
         if (!session) {
             await this.send(message, bridgePlain("no sessions found"));
             return;

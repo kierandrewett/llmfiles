@@ -8,7 +8,13 @@ import { type BridgeConfig } from "../src/config.js";
 import { type OpenCodeHealth, type OpenCodeSession } from "../src/opencode.js";
 import { readBridgeState, writeBridgeState, createDefaultBridgeState } from "../src/state.js";
 import { TelegramBridgeRouter } from "../src/telegram-router.js";
-import { TELEGRAM_MARKDOWN_PARSE_MODE, type SendChatActionInput, type SendMessageInput, type SetMessageReactionInput, type TelegramUpdate } from "../src/telegram.js";
+import {
+    TELEGRAM_MARKDOWN_PARSE_MODE,
+    type SendChatActionInput,
+    type SendMessageInput,
+    type SetMessageReactionInput,
+    type TelegramUpdate,
+} from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 

@@ -6,7 +6,12 @@ import { afterEach, describe, it } from "node:test";
 
 import { createDefaultBridgeState, readBridgeState, writeBridgeState } from "../src/state.js";
 import { TelegramBridgePoller } from "../src/telegram-poller.js";
-import { TELEGRAM_BRIDGE_BOT_COMMANDS, type GetUpdatesOptions, type SetMyCommandsInput, type TelegramUpdate } from "../src/telegram.js";
+import {
+    TELEGRAM_BRIDGE_BOT_COMMANDS,
+    type GetUpdatesOptions,
+    type SetMyCommandsInput,
+    type TelegramUpdate,
+} from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 
