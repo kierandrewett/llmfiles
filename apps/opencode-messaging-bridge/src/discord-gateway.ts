@@ -100,6 +100,7 @@ export class DiscordGatewayRunner {
         const socket = this.createSocket(url);
         this.activeSocket = socket;
         let processed = 0;
+        let messageQueue = Promise.resolve();
 
         return await new Promise<number>((resolve, reject) => {
             let settled = false;
@@ -119,17 +120,21 @@ export class DiscordGatewayRunner {
             };
 
             socket.addEventListener("message", (event) => {
-                void (async () => {
+                messageQueue = messageQueue.then(async () => {
                     try {
                         const payload = parseGatewayPayload(await socketDataToText(event.data));
                         processed += await this.handlePayload(payload);
                     } catch (error) {
                         finish({ error });
                     }
-                })();
+                });
             });
             socket.addEventListener("close", () => {
-                finish({ value: processed });
+                void messageQueue.then(() => {
+                    finish({ value: processed });
+                }, (error: unknown) => {
+                    finish({ error });
+                });
             });
             socket.addEventListener("error", (event) => {
                 finish({ error: event.error ?? new Error("Discord gateway socket error") });

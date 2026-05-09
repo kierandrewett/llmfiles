@@ -34,7 +34,7 @@ describe("DiscordGatewayRunner", () => {
         const socket = await fixture.waitForSocket();
 
         socket.emit({ op: 10, d: { heartbeat_interval: 45000 }, s: null, t: null });
-        await flushAsyncWork();
+        await waitFor(() => socket.sent.length === 1);
 
         assert.deepEqual(socket.sentJson[0], {
             op: 2,
@@ -85,7 +85,7 @@ describe("DiscordGatewayRunner", () => {
 
         assert.equal(socket.url, "wss://resume.discord.test/?v=10&encoding=json");
         socket.emit({ op: 10, d: { heartbeat_interval: 45000 }, s: null, t: null });
-        await flushAsyncWork();
+        await waitFor(() => socket.sent.length === 1);
         socket.emitClose();
 
         assert.deepEqual(socket.sentJson[0], {
