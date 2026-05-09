@@ -197,8 +197,15 @@ function bridgeConfig(statePath: string): BridgeConfig {
             enabled: false,
             botToken: null,
             applicationID: null,
+            guildID: null,
             allowedUserIDs: [],
             controlChannelID: null,
+            prefix: "!oc",
+            slashCommand: "oc",
+            registerSlashCommands: false,
+            slashResponsesEphemeral: true,
+            messageContentIntent: false,
+            maxMessageChars: 1850,
         },
     };
 }
