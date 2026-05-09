@@ -17,6 +17,16 @@ This package implements the Phase 1 foundation and the first Telegram inbound sl
 
 It does not start Discord or handle OpenCode permission replies from Telegram yet.
 
+## Contents
+
+- [How Docker control works](#how-docker-control-works)
+- [Control surface support](#control-surface-support)
+- [Telegram setup](#telegram-setup)
+- [Discord setup](#discord-setup)
+- [Local setup](#local-setup)
+- [Commands](#commands)
+- [Docker](#docker)
+
 ## How Docker control works
 
 The Docker image runs one bridge process. By default that bridge starts `opencode serve` inside the same container and
@@ -33,7 +43,125 @@ No OpenCode HTTP port needs to be exposed. The container only needs outbound net
 model provider OpenCode uses. Telegram sends updates to the bot API, the bridge long-polls those updates, sends prompts to
 OpenCode, then relays assistant text back to the bound Telegram chat.
 
-## Setup
+## Control surface support
+
+| Surface | Runtime | Status |
+| --- | --- | --- |
+| Telegram | Standalone bridge app, Docker, or Docker Compose | Implemented here |
+| Discord | `plugins/opencode/discord-remote-control.ts` OpenCode plugin | Implemented as a plugin, not in this Docker daemon yet |
+
+Use Telegram for the always-on Docker bridge. Use Discord through the existing OpenCode plugin until the daemon gets a
+Discord adapter.
+
+## Telegram setup
+
+Create a Telegram bot through BotFather, then send the bot one message from the chat you want to allow. Use the bot token
+to inspect the update payload and copy the numeric `from.id` and `chat.id` values:
+
+```bash
+export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="123456789:replace-with-real-token"
+curl -s "https://api.telegram.org/bot${OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN}/getUpdates"
+```
+
+Use those values in the bridge runtime env file:
+
+```bash
+OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token
+OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS=123456789
+OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS=123456789
+OPENCODE_BRIDGE_IMPLICIT_REPLY=0
+```
+
+`OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS` is technically optional, but keep it set on a server. Without it, any chat
+from an allowlisted user can control the bridge.
+
+If the bot was previously configured with a webhook, remove it before using long polling:
+
+```bash
+curl -s -X POST "https://api.telegram.org/bot${OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN}/deleteWebhook"
+```
+
+### Telegram smoke test
+
+Send these messages to the allowlisted Telegram chat:
+
+```text
+/oc status
+/oc new Docker bridge smoke test
+/oc prompt what repository are you running in?
+/oc abort
+```
+
+Expected result:
+
+- `/oc status` reports OpenCode health and the active session.
+- `/oc new` creates and binds a session to that Telegram chat.
+- `/oc prompt` sends text to the bound OpenCode session.
+- Assistant text is relayed back into Telegram from the OpenCode event stream.
+
+## Discord setup
+
+Discord control currently uses the OpenCode plugin, not this Docker bridge. That means Discord runs inside whichever
+OpenCode process loads `~/.config/opencode/plugins/discord-remote-control.ts`.
+
+Install the OpenCode profile and plugin links from the repo root:
+
+```bash
+just install-opencode-all
+```
+
+Create a Discord application and bot in the Discord Developer Portal, then invite the bot to a private control channel.
+Use these permissions as the baseline:
+
+- `Read Messages/View Channels`
+- `Send Messages`
+- `Read Message History`
+- `Use Slash Commands`
+- `Create Public Threads` or `Create Private Threads` if session threads are enabled
+- `Manage Threads` if the plugin should rename or tag session threads
+
+Enable the Message Content privileged intent only if you want prefix commands or plain-text replies in guild channels.
+Slash commands and DMs reduce the need for that intent.
+
+Set the required Discord environment before starting OpenCode:
+
+```bash
+export OPENCODE_DISCORD_BOT_TOKEN="replace-with-real-token"
+export OPENCODE_DISCORD_CHANNEL_ID="123456789012345678"
+export OPENCODE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
+```
+
+Useful optional settings:
+
+```bash
+export OPENCODE_DISCORD_APPLICATION_ID="123456789012345678"
+export OPENCODE_DISCORD_GUILD_ID="123456789012345678"
+export OPENCODE_DISCORD_SLASH_COMMANDS="1"
+export OPENCODE_DISCORD_REGISTER_SLASH_COMMANDS="1"
+export OPENCODE_DISCORD_SLASH_EPHEMERAL="1"
+export OPENCODE_DISCORD_SESSION_THREADS="0"
+export OPENCODE_DISCORD_IMPLICIT_REPLY="0"
+```
+
+Start OpenCode normally after those variables are set:
+
+```bash
+opencode
+```
+
+Then smoke test from Discord:
+
+```text
+/oc status
+/oc sessions
+/oc new Discord smoke test
+/oc prompt what repository are you running in?
+/oc abort
+```
+
+More plugin-specific details live in `../../plugins/opencode/discord-remote-control.md`.
+
+## Local setup
 
 Install package dependencies:
 
@@ -118,6 +246,52 @@ For a repeatable OpenCode version, pass the installer version from the OpenCode 
 docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge .
 ```
 
+### Docker Compose
+
+Docker Compose is the preferred server path for the Telegram bridge.
+
+Copy the Compose interpolation example and edit the host paths:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
+Create the private runtime env file referenced by `.env`:
+
+```bash
+mkdir -p "$HOME/.config/opencode-messaging-bridge"
+cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
+$EDITOR "$HOME/.config/opencode-messaging-bridge/env"
+```
+
+Check the Compose shape with the example env before using real tokens:
+
+```bash
+OPENCODE_BRIDGE_RUNTIME_ENV_FILE=./bridge.env.example docker compose --env-file .env.example config
+```
+
+Do not run `docker compose config` against the real runtime env unless you are happy for the Telegram bot token to appear
+in your terminal scrollback.
+
+Start the bridge:
+
+```bash
+docker compose up -d --build
+docker compose logs -f opencode-bridge
+```
+
+Stop or restart it:
+
+```bash
+docker compose restart opencode-bridge
+docker compose down
+```
+
+The Compose file deliberately does not publish port `4096`. OpenCode stays on `127.0.0.1` inside the container.
+
+### Raw Docker
+
 Create an untracked environment file on the host. Do not commit this file.
 
 ```bash
@@ -169,24 +343,6 @@ mounted into the container at runtime. OAuth-style credentials may need write ac
 the container writing to your host auth directory, copy the OpenCode auth directory into a private Docker volume and mount
 that instead. The same rule applies to OpenCode config under `~/.config/opencode`: mount it at runtime, do not copy it
 into the image, and do not commit generated auth files.
-
-### Telegram smoke test
-
-Send these messages to the allowlisted Telegram chat:
-
-```text
-/oc status
-/oc new Docker bridge smoke test
-/oc prompt what repository are you running in?
-/oc abort
-```
-
-Expected result:
-
-- `/oc status` reports OpenCode health and the active session.
-- `/oc new` creates and binds a session to that Telegram chat.
-- `/oc prompt` sends text to the bound OpenCode session.
-- Assistant text is relayed back into Telegram from the OpenCode event stream.
 
 ### Docker config symlink gotcha
 

@@ -34,17 +34,18 @@ just install-local-skill ntfy /tmp/skills     # one local skill to any target
 
 Existing real files are skipped. Existing symlinks are relinked.
 
-## OpenCode from Telegram
+## OpenCode remote control
 
-The standalone bridge can run in Docker and let an allowlisted Telegram chat control an OpenCode session. Start with the
-package README:
+The standalone bridge can run in Docker Compose and let an allowlisted Telegram chat control an OpenCode session. Discord
+control currently uses the existing OpenCode plugin rather than the Docker bridge. Start with the package README:
 
 ```text
 apps/opencode-messaging-bridge/README.md
 ```
 
 The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth/config and the target repo at
-runtime, and stores Telegram offsets plus session bindings in a Docker volume.
+runtime, and stores Telegram offsets plus session bindings in a Docker volume. The Discord plugin setup lives in
+`plugins/opencode/discord-remote-control.md`.
 
 ## Sync notes
 

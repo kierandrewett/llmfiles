@@ -1,0 +1,52 @@
+services:
+  opencode-bridge:
+    build:
+      context: .
+      args:
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-}
+    image: ${OPENCODE_BRIDGE_IMAGE:-opencode-messaging-bridge:local}
+    container_name: ${OPENCODE_BRIDGE_CONTAINER_NAME:-opencode-bridge}
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ${OPENCODE_BRIDGE_RUNTIME_ENV_FILE:?Set OPENCODE_BRIDGE_RUNTIME_ENV_FILE in .env}
+    environment:
+      OPENCODE_BRIDGE_MANAGE_OPENCODE: "1"
+      OPENCODE_BRIDGE_OPENCODE_HOST: "127.0.0.1"
+      OPENCODE_BRIDGE_OPENCODE_PORT: "${OPENCODE_BRIDGE_OPENCODE_PORT:-4096}"
+      OPENCODE_BRIDGE_OPENCODE_WORKDIR: "/workspace/project"
+      XDG_STATE_HOME: "/state"
+    volumes:
+      - type: bind
+        source: ${OPENCODE_BRIDGE_AUTH_DIR:?Set OPENCODE_BRIDGE_AUTH_DIR in .env}
+        target: /home/node/.local/share/opencode
+      - type: bind
+        source: ${OPENCODE_BRIDGE_CONFIG_DIR:?Set OPENCODE_BRIDGE_CONFIG_DIR in .env}
+        target: /home/node/.config/opencode
+        read_only: true
+      - type: bind
+        source: ${OPENCODE_BRIDGE_PROJECT_DIR:?Set OPENCODE_BRIDGE_PROJECT_DIR in .env}
+        target: /workspace/project
+      - type: bind
+        source: ${OPENCODE_BRIDGE_LLMFILES_DIR:?Set OPENCODE_BRIDGE_LLMFILES_DIR in .env}
+        target: /home/kieran/dev/llmfiles
+        read_only: true
+      - type: volume
+        source: opencode-bridge-state
+        target: /state
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS "http://127.0.0.1:${OPENCODE_BRIDGE_OPENCODE_PORT:-4096}/global/health" >/dev/null || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  opencode-bridge-state: {}
