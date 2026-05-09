@@ -112,6 +112,7 @@ export class DiscordGatewayRunner {
                 this.clearHeartbeat();
                 this.activeSocket = null;
                 if ("error" in result) {
+                    this.activeSocket?.close(GATEWAY_CLOSE_RECONNECT, "discord gateway handler error");
                     reject(result.error);
                     return;
                 }
@@ -272,6 +273,8 @@ export class DiscordGatewayRunner {
         this.heartbeat.acked = false;
         void loadOrCreateBridgeState(this.config.statePath, this.now()).then((state) => {
             this.sendGateway({ op: 1, d: state.platforms.discord.sequence });
+        }).catch(() => {
+            this.activeSocket?.close(GATEWAY_CLOSE_RECONNECT, "discord heartbeat state read failed");
         });
     }
 
