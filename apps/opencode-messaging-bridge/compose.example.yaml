@@ -1,6 +1,10 @@
-# Copy to compose.local.yaml, replace the placeholders, then run:
+# One-file setup path. Copy to compose.local.yaml, replace the placeholders, then run:
+# just opencode-bridge-config
 # docker compose -f compose.local.yaml up -d --build
 # docker compose -f compose.local.yaml logs -f opencode-bridge
+#
+# This file defaults to telegram+discord. If you only want one surface, change the command
+# to "discord" or "telegram" and delete the unused environment block.
 
 services:
   opencode-bridge:
@@ -10,17 +14,28 @@ services:
         OPENCODE_VERSION: "1.0.180"
     image: opencode-messaging-bridge:local
     container_name: opencode-bridge
-    command: ["yarn", "start", "discord"] # telegram, discord, or telegram+discord
+    command: ["yarn", "start", "telegram+discord"]
     init: true
     restart: unless-stopped
     environment:
+      # The bridge starts opencode serve inside this container on loopback.
       OPENCODE_BRIDGE_MANAGE_OPENCODE: "1"
       OPENCODE_BRIDGE_OPENCODE_HOST: "127.0.0.1"
       OPENCODE_BRIDGE_OPENCODE_PORT: "4096"
       OPENCODE_BRIDGE_OPENCODE_WORKDIR: "/workspace/project"
+
+      # 0 means plain messages must use /oc prompt or !oc prompt.
+      # Set to 1 only if you want plain chat text to go to the active session.
       OPENCODE_BRIDGE_IMPLICIT_REPLY: "0"
       XDG_STATE_HOME: "/state"
 
+      # Discord setup:
+      # 1. Go to https://discord.com/developers/applications and create an app.
+      # 2. Add a bot, copy its token, and put it below.
+      # 3. Invite it with the bot and applications.commands scopes.
+      # 4. Give it View Channel, Send Messages, Read Message History, and Use Slash Commands.
+      # 5. Copy IDs with Discord developer mode enabled: right-click user/channel/server, Copy ID.
+      # 6. Leave Message Content intent at 0 unless you want !oc prefix commands or plain text replies.
       OPENCODE_BRIDGE_DISCORD_BOT_TOKEN: "replace-with-real-token"
       OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID: "123456789012345678"
       OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS: "123456789012345678"
@@ -32,14 +47,25 @@ services:
       OPENCODE_BRIDGE_DISCORD_SLASH_EPHEMERAL: "1"
       OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT: "0"
 
-      # Uncomment these when command is telegram or telegram+discord.
-      # OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN: "123456789:replace-with-real-token"
-      # OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS: "123456789"
-      # OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS: "123456789"
+      # Telegram setup:
+      # 1. Message @BotFather in Telegram, create a bot, and paste its token below.
+      # 2. Send the bot one message from the chat you want to control OpenCode from.
+      # 3. Visit https://api.telegram.org/botYOUR_TOKEN/getUpdates to copy from.id and chat.id.
+      # 4. Keep ALLOWED_CHAT_IDS set on a server so one allowed user cannot use the bot from any chat.
+      OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN: "123456789:replace-with-real-token"
+      OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS: "123456789"
+      OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS: "123456789"
     volumes:
+      # OpenCode auth from /connect. This may need write access for token refresh.
       - "/home/kieran/.local/share/opencode:/home/node/.local/share/opencode"
+
+      # Resolved config built by just opencode-bridge-config. No llmfiles mount needed.
       - "/home/kieran/.config/opencode-messaging-bridge/opencode-config:/home/node/.config/opencode:ro"
+
+      # Host project to control. Inside the container it is always /workspace/project.
       - "/home/kieran/dev/bsociety:/workspace/project"
+
+      # Bridge state only: Telegram offsets, Discord resume data, slash signatures, and bindings.
       - "opencode-bridge-state:/state"
 
 volumes:

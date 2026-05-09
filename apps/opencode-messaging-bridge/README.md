@@ -368,7 +368,8 @@ docker compose -f compose.local.yaml up -d --build
 docker compose -f compose.local.yaml logs -f opencode-bridge
 ```
 
-`compose.local.yaml` is ignored by git. Put the real Discord or Telegram token values there if you use this path.
+`compose.local.yaml` is ignored by git. The example defaults to `telegram+discord`; change the command if you only want
+one surface. Put the real Discord or Telegram token values there if you use this path.
 
 Build a Docker-safe OpenCode config directory first. This copies your OpenCode config with symlinks resolved, so the
 container does not need a `llmfiles` mount:
