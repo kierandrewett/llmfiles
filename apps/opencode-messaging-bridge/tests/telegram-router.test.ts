@@ -174,7 +174,17 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
 
 function bridgeConfig(statePath: string): BridgeConfig {
     return {
-        opencode: { baseUrl: "http://127.0.0.1:4096" },
+        opencode: {
+            baseUrl: "http://127.0.0.1:4096",
+            process: {
+                manage: false,
+                command: "opencode",
+                host: "127.0.0.1",
+                port: 4096,
+                workdir: null,
+                startupTimeoutMs: 30000,
+            },
+        },
         statePath,
         implicitReply: false,
         telegram: {

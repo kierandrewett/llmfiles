@@ -28,10 +28,52 @@ describe("loadBridgeConfig", () => {
         const config = loadBridgeConfig({ HOME: "/home/example" });
 
         assert.equal(config.opencode.baseUrl, "http://127.0.0.1:4096");
+        assert.deepEqual(config.opencode.process, {
+            manage: false,
+            command: "opencode",
+            host: "127.0.0.1",
+            port: 4096,
+            workdir: null,
+            startupTimeoutMs: 30000,
+        });
         assert.equal(config.statePath, "/home/example/.local/state/opencode-messaging-bridge/state.json");
         assert.equal(config.implicitReply, false);
         assert.equal(config.telegram.enabled, false);
         assert.equal(config.discord.enabled, false);
+    });
+
+    it("loads managed OpenCode process settings and derives the default base URL", () => {
+        const config = loadBridgeConfig({
+            HOME: "/home/example",
+            OPENCODE_BRIDGE_MANAGE_OPENCODE: "true",
+            OPENCODE_BRIDGE_OPENCODE_COMMAND: "/usr/local/bin/opencode",
+            OPENCODE_BRIDGE_OPENCODE_HOST: "0.0.0.0",
+            OPENCODE_BRIDGE_OPENCODE_PORT: "4100",
+            OPENCODE_BRIDGE_OPENCODE_WORKDIR: "/workspace/project",
+            OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS: "15000",
+        });
+
+        assert.equal(config.opencode.baseUrl, "http://127.0.0.1:4100");
+        assert.deepEqual(config.opencode.process, {
+            manage: true,
+            command: "/usr/local/bin/opencode",
+            host: "0.0.0.0",
+            port: 4100,
+            workdir: "/workspace/project",
+            startupTimeoutMs: 15000,
+        });
+    });
+
+    it("lets an explicit OpenCode base URL override the managed bind address", () => {
+        const config = loadBridgeConfig({
+            HOME: "/home/example",
+            OPENCODE_BRIDGE_MANAGE_OPENCODE: "1",
+            OPENCODE_BRIDGE_OPENCODE_HOST: "0.0.0.0",
+            OPENCODE_BRIDGE_OPENCODE_PORT: "4100",
+            OPENCODE_BRIDGE_OPENCODE_BASE_URL: "http://opencode.internal:4100/",
+        });
+
+        assert.equal(config.opencode.baseUrl, "http://opencode.internal:4100");
     });
 
     it("normalises explicit URLs and parses allowlists", () => {
@@ -61,6 +103,17 @@ describe("loadBridgeConfig", () => {
         assert.throws(
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENCODE_BASE_URL: "not a url" }),
             /OPENCODE_BRIDGE_OPENCODE_BASE_URL must be a valid URL/,
+        );
+    });
+
+    it("rejects invalid managed OpenCode numeric settings", () => {
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENCODE_PORT: "70000" }),
+            /OPENCODE_BRIDGE_OPENCODE_PORT must be an integer between 1 and 65535/,
+        );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS: "0" }),
+            /OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS must be an integer greater than 0/,
         );
     });
 

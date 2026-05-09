@@ -1,12 +1,25 @@
 import path from "node:path";
 
-const DEFAULT_OPENCODE_BASE_URL = "http://127.0.0.1:4096";
+const DEFAULT_OPENCODE_COMMAND = "opencode";
+const DEFAULT_OPENCODE_HOST = "127.0.0.1";
+const DEFAULT_OPENCODE_PORT = 4096;
+const DEFAULT_OPENCODE_STARTUP_TIMEOUT_MS = 30000;
 const STATE_DIR_NAME = "opencode-messaging-bridge";
 const STATE_FILE_NAME = "state.json";
+
+export interface OpenCodeProcessConfig {
+    manage: boolean;
+    command: string;
+    host: string;
+    port: number;
+    workdir: string | null;
+    startupTimeoutMs: number;
+}
 
 export interface BridgeConfig {
     opencode: {
         baseUrl: string;
+        process: OpenCodeProcessConfig;
     };
     statePath: string;
     implicitReply: boolean;
@@ -53,8 +66,9 @@ export function defaultStatePath(env: Env = process.env): string {
 }
 
 export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
+    const opencodeProcess = loadOpenCodeProcessConfig(env);
     const opencodeBaseUrl = normaliseBaseUrl(
-        env.OPENCODE_BRIDGE_OPENCODE_BASE_URL ?? DEFAULT_OPENCODE_BASE_URL,
+        env.OPENCODE_BRIDGE_OPENCODE_BASE_URL ?? defaultOpenCodeBaseUrl(opencodeProcess),
         "OPENCODE_BRIDGE_OPENCODE_BASE_URL",
     );
     const statePath = env.OPENCODE_BRIDGE_STATE_PATH?.trim() || defaultStatePath(env);
@@ -68,6 +82,7 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
     return {
         opencode: {
             baseUrl: opencodeBaseUrl,
+            process: opencodeProcess,
         },
         statePath,
         implicitReply: parseBoolean(env.OPENCODE_BRIDGE_IMPLICIT_REPLY),
@@ -85,6 +100,50 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
             controlChannelID: discordControlChannelID,
         },
     };
+}
+
+function loadOpenCodeProcessConfig(env: Env): OpenCodeProcessConfig {
+    return {
+        manage: parseBoolean(env.OPENCODE_BRIDGE_MANAGE_OPENCODE),
+        command: readRequiredString(
+            env.OPENCODE_BRIDGE_OPENCODE_COMMAND,
+            DEFAULT_OPENCODE_COMMAND,
+            "OPENCODE_BRIDGE_OPENCODE_COMMAND",
+        ),
+        host: readRequiredString(
+            env.OPENCODE_BRIDGE_OPENCODE_HOST,
+            DEFAULT_OPENCODE_HOST,
+            "OPENCODE_BRIDGE_OPENCODE_HOST",
+        ),
+        port: parseIntegerInRange(
+            env.OPENCODE_BRIDGE_OPENCODE_PORT,
+            DEFAULT_OPENCODE_PORT,
+            1,
+            65535,
+            "OPENCODE_BRIDGE_OPENCODE_PORT",
+        ),
+        workdir: readOptionalString(env.OPENCODE_BRIDGE_OPENCODE_WORKDIR),
+        startupTimeoutMs: parsePositiveInteger(
+            env.OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS,
+            DEFAULT_OPENCODE_STARTUP_TIMEOUT_MS,
+            "OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS",
+        ),
+    };
+}
+
+function defaultOpenCodeBaseUrl(config: OpenCodeProcessConfig): string {
+    return `http://${hostForClientUrl(config.host)}:${String(config.port)}`;
+}
+
+function hostForClientUrl(host: string): string {
+    if (host === "0.0.0.0" || host === "::") {
+        return DEFAULT_OPENCODE_HOST;
+    }
+    if (host.includes(":") && !host.startsWith("[")) {
+        return `[${host}]`;
+    }
+
+    return host;
 }
 
 function normaliseBaseUrl(value: string, envName: string): string {
@@ -112,6 +171,38 @@ function parseBoolean(value: string | undefined): boolean {
     return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
+function parseIntegerInRange(value: string | undefined, fallback: number, min: number, max: number, envName: string): number {
+    const parsed = parseInteger(value, fallback, envName);
+    if (parsed < min || parsed > max) {
+        throw new Error(`${envName} must be an integer between ${String(min)} and ${String(max)}`);
+    }
+
+    return parsed;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number, envName: string): number {
+    const parsed = parseInteger(value, fallback, envName);
+    if (parsed <= 0) {
+        throw new Error(`${envName} must be an integer greater than 0`);
+    }
+
+    return parsed;
+}
+
+function parseInteger(value: string | undefined, fallback: number, envName: string): number {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+        return fallback;
+    }
+
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed)) {
+        throw new Error(`${envName} must be an integer`);
+    }
+
+    return parsed;
+}
+
 function readSecret(value: string | undefined): string | null {
     const trimmed = value?.trim();
     return trimmed && trimmed.length > 0 ? trimmed : null;
@@ -120,4 +211,16 @@ function readSecret(value: string | undefined): string | null {
 function readOptionalString(value: string | undefined): string | null {
     const trimmed = value?.trim();
     return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function readRequiredString(value: string | undefined, fallback: string, envName: string): string {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+        return fallback;
+    }
+    if (/\s/.test(trimmed)) {
+        throw new Error(`${envName} must not contain whitespace`);
+    }
+
+    return trimmed;
 }
