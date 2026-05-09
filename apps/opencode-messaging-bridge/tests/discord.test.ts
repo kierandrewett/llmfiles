@@ -16,7 +16,7 @@ describe("chunkDiscordText", () => {
 
         assert.ok(chunks.length > 1);
         assert.ok(chunks.every((chunk) => chunk.length <= 30));
-        assert.equal(chunks.join(" ").replace(/\s+/g, " "), `hello ${"world ".repeat(20)}`.trim());
+        assert.equal(chunks.join(" ").trim().replace(/\s+/g, " "), `hello ${"world ".repeat(20)}`.trim());
     });
 });
 
