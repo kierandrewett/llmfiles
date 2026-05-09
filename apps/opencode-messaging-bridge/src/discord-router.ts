@@ -1,3 +1,11 @@
+import {
+    createScheduledJobID,
+    formatScheduleInterval,
+    nextScheduledRun,
+    parseScheduleArgs,
+    recordScheduledJobRun,
+    scheduleErrorMessage,
+} from "./automation.js";
 import type { BridgeConfig } from "./config.js";
 import {
     DISCORD_CHAT_INPUT_COMMAND,
@@ -15,6 +23,7 @@ import {
 import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
+    type BridgeScheduledJobState,
     type BridgeState,
     type BridgeSurfaceAddress,
     type BridgeSurfaceState,
@@ -143,12 +152,28 @@ export class DiscordBridgeRouter {
             await this.handleAbort(channelID);
             return;
         }
+        if (command.name === "jobs") {
+            await this.handleJobs(channelID);
+            return;
+        }
+        if (command.name === "schedule") {
+            await this.handleSchedule(channelID, command.args);
+            return;
+        }
+        if (command.name === "unschedule") {
+            await this.handleUnschedule(channelID, command.args[0]);
+            return;
+        }
+        if (command.name === "run-now") {
+            await this.handleRunNow(channelID, command.args[0]);
+            return;
+        }
         if (command.name === "allow" || command.name === "always" || command.name === "deny") {
             await this.handlePermissionReply(channelID, command.name, command.args);
             return;
         }
 
-        await this.send(channelID, `[bridge] unknown command. Try ${this.config.discord.prefix} status, ${this.config.discord.prefix} sessions, ${this.config.discord.prefix} attach latest, ${this.config.discord.prefix} new, ${this.config.discord.prefix} prompt, or ${this.config.discord.prefix} allow.`);
+        await this.send(channelID, `[bridge] unknown command. Try ${this.config.discord.prefix} status, ${this.config.discord.prefix} sessions, ${this.config.discord.prefix} attach latest, ${this.config.discord.prefix} new, ${this.config.discord.prefix} prompt, ${this.config.discord.prefix} schedule, or ${this.config.discord.prefix} allow.`);
     }
 
     private async handleStatus(channelID: string): Promise<void> {
@@ -221,6 +246,105 @@ export class DiscordBridgeRouter {
 
         await this.opencode.abortSession({ sessionID: surface.activeSessionID });
         await this.send(channelID, `[bridge] abort requested for ${surface.activeSessionID}`);
+    }
+
+    private async handleJobs(channelID: string): Promise<void> {
+        const state = await this.loadState();
+        const jobs = jobsForSurface(state, surfaceID(channelID));
+        if (jobs.length === 0) {
+            await this.send(channelID, "[bridge] no scheduled jobs for this channel");
+            return;
+        }
+
+        await this.send(channelID, jobs.map(formatDiscordJobLine).join("\n"));
+    }
+
+    private async handleSchedule(channelID: string, args: string[]): Promise<void> {
+        const parsed = parseScheduleArgs(args);
+        if (!parsed.ok) {
+            await this.send(channelID, `[bridge] ${parsed.message}`);
+            return;
+        }
+
+        const state = await this.loadState();
+        const id = surfaceID(channelID);
+        const surface = findSurface(state, id);
+        if (!surface?.activeSessionID) {
+            await this.send(channelID, `[bridge] no active session. Use ${this.config.discord.prefix} attach latest or ${this.config.discord.prefix} new first.`);
+            return;
+        }
+
+        const now = this.now();
+        const timestamp = now.toISOString();
+        const job: BridgeScheduledJobState = {
+            id: createScheduledJobID(state, now),
+            platform: "discord",
+            surfaceID: id,
+            surface: surface.surface,
+            sessionID: surface.activeSessionID,
+            prompt: parsed.prompt,
+            intervalMinutes: parsed.intervalMinutes,
+            nextRunAt: nextScheduledRun(now, parsed.intervalMinutes),
+            lastRunAt: null,
+            lastError: null,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        };
+        state.jobs.push(job);
+        state.updatedAt = timestamp;
+
+        await writeBridgeState(this.config.statePath, state);
+        await this.send(channelID, `[bridge] scheduled ${job.id} every ${formatScheduleInterval(job.intervalMinutes)} for ${job.sessionID}`);
+    }
+
+    private async handleUnschedule(channelID: string, jobID: string | undefined): Promise<void> {
+        if (!jobID) {
+            await this.send(channelID, "[bridge] job ID is required");
+            return;
+        }
+
+        const state = await this.loadState();
+        const index = state.jobs.findIndex((job) => job.surfaceID === surfaceID(channelID) && job.id === jobID);
+        if (index === -1) {
+            await this.send(channelID, "[bridge] scheduled job not found for this channel");
+            return;
+        }
+
+        state.jobs.splice(index, 1);
+        state.updatedAt = this.now().toISOString();
+
+        await writeBridgeState(this.config.statePath, state);
+        await this.send(channelID, `[bridge] unscheduled ${jobID}`);
+    }
+
+    private async handleRunNow(channelID: string, jobID: string | undefined): Promise<void> {
+        if (!jobID) {
+            await this.send(channelID, "[bridge] job ID is required");
+            return;
+        }
+
+        const state = await this.loadState();
+        const job = state.jobs.find((entry) => entry.surfaceID === surfaceID(channelID) && entry.id === jobID);
+        if (!job) {
+            await this.send(channelID, "[bridge] scheduled job not found for this channel");
+            return;
+        }
+
+        const now = this.now();
+        await this.discord.sendTyping({ channelID });
+        try {
+            await this.opencode.sendPrompt({ sessionID: job.sessionID, text: job.prompt });
+            recordScheduledJobRun(job, now, null);
+            state.updatedAt = now.toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(channelID, `[bridge] ran scheduled job ${job.id} for ${job.sessionID}`);
+        } catch (error) {
+            const message = scheduleErrorMessage(error);
+            recordScheduledJobRun(job, now, message);
+            state.updatedAt = now.toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(channelID, `[bridge] scheduled job ${job.id} failed: ${message}`);
+        }
     }
 
     private async handlePermissionReply(channelID: string, command: "allow" | "always" | "deny", args: string[]): Promise<void> {
@@ -375,6 +499,14 @@ export function parseDiscordSlashCommand(interaction: DiscordInteraction, comman
         const text = optionValue(options, "text");
         return { name, args: text ? [text] : [], text };
     }
+    if (name === "schedule") {
+        const text = optionValue(options, "text");
+        return { name, args: text.split(/\s+/).filter((entry) => entry.length > 0), text };
+    }
+    if (name === "unschedule" || name === "run-now") {
+        const jobID = optionValue(options, "job_id");
+        return { name, args: jobID ? [jobID] : [], text: jobID };
+    }
     if (name === "allow" || name === "always" || name === "deny") {
         const permissionID = optionValue(options, "permission_id");
         const message = name === "deny" ? optionValue(options, "message") : "";
@@ -427,6 +559,19 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
     }
 
     state.bindings[index] = binding;
+}
+
+function jobsForSurface(state: BridgeState, id: string): BridgeScheduledJobState[] {
+    return state.jobs.filter((job) => job.surfaceID === id);
+}
+
+function formatDiscordJobLine(job: BridgeScheduledJobState): string {
+    const line = `[bridge] ${job.id} every ${formatScheduleInterval(job.intervalMinutes)} next ${job.nextRunAt} session ${job.sessionID}`;
+    if (!job.lastError) {
+        return line;
+    }
+
+    return `${line} last error: ${job.lastError}`;
 }
 
 function formatSessionLine(session: OpenCodeSession): string {

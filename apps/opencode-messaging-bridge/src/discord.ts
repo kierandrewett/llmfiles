@@ -218,6 +218,16 @@ export function discordSlashCommandDefinition(name: string): Record<string, unkn
                 stringOption("text", "Reply text.", true),
             ]),
             subcommand("abort", "Abort the active session."),
+            subcommand("jobs", "List scheduled prompts for this channel."),
+            subcommand("schedule", "Schedule a prompt for the active session.", [
+                stringOption("text", "Schedule, for example: every 30m check status.", true),
+            ]),
+            subcommand("unschedule", "Remove a scheduled prompt.", [
+                stringOption("job_id", "Scheduled prompt job ID.", true),
+            ]),
+            subcommand("run-now", "Run a scheduled prompt immediately.", [
+                stringOption("job_id", "Scheduled prompt job ID.", true),
+            ]),
             subcommand("allow", "Approve a pending OpenCode permission once.", [
                 stringOption("permission_id", "Permission request ID.", true),
             ]),

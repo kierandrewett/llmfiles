@@ -1,7 +1,16 @@
+import {
+    createScheduledJobID,
+    formatScheduleInterval,
+    nextScheduledRun,
+    parseScheduleArgs,
+    recordScheduledJobRun,
+    scheduleErrorMessage,
+} from "./automation.js";
 import type { BridgeConfig } from "./config.js";
 import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
+    type BridgeScheduledJobState,
     type BridgeState,
     type BridgeSurfaceAddress,
     type BridgeSurfaceState,
@@ -23,7 +32,22 @@ import {
 
 const TELEGRAM_REACTION_DONE = "\u{1F44D}";
 const TELEGRAM_REACTION_UNKNOWN = "\u{1F914}";
-const TELEGRAM_DIRECT_COMMANDS = new Set(["status", "sessions", "attach", "new", "prompt", "reply", "abort", "allow", "always", "deny"]);
+const TELEGRAM_DIRECT_COMMANDS = new Set([
+    "status",
+    "sessions",
+    "attach",
+    "new",
+    "prompt",
+    "reply",
+    "abort",
+    "jobs",
+    "schedule",
+    "unschedule",
+    "run_now",
+    "allow",
+    "always",
+    "deny",
+]);
 
 export interface TelegramRouterOpenCodeClient {
     health(): Promise<OpenCodeHealth>;
@@ -119,6 +143,26 @@ export class TelegramBridgeRouter {
             await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
+        if (command.name === "jobs") {
+            await this.handleJobs(message);
+            await this.react(message, TELEGRAM_REACTION_DONE);
+            return;
+        }
+        if (command.name === "schedule") {
+            await this.handleSchedule(message, command.args);
+            await this.react(message, TELEGRAM_REACTION_DONE);
+            return;
+        }
+        if (command.name === "unschedule") {
+            await this.handleUnschedule(message, command.args[0]);
+            await this.react(message, TELEGRAM_REACTION_DONE);
+            return;
+        }
+        if (command.name === "run-now") {
+            await this.handleRunNow(message, command.args[0]);
+            await this.react(message, TELEGRAM_REACTION_DONE);
+            return;
+        }
         if (command.name === "allow" || command.name === "always" || command.name === "deny") {
             await this.handlePermissionReply(message, command.name, command.args);
             await this.react(message, TELEGRAM_REACTION_DONE);
@@ -127,7 +171,7 @@ export class TelegramBridgeRouter {
 
         await this.send(
             message,
-            bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, /oc prompt, or /oc allow."),
+            bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, /oc prompt, /oc schedule, or /oc allow."),
         );
         await this.react(message, TELEGRAM_REACTION_UNKNOWN);
     }
@@ -231,6 +275,105 @@ export class TelegramBridgeRouter {
 
         await this.opencode.abortSession({ sessionID: surface.activeSessionID });
         await this.send(message, bridgeLine(`abort requested for ${markdownCode(surface.activeSessionID)}`));
+    }
+
+    private async handleJobs(message: TelegramMessage): Promise<void> {
+        const state = await this.loadState();
+        const jobs = jobsForSurface(state, surfaceID(message));
+        if (jobs.length === 0) {
+            await this.send(message, bridgePlain("no scheduled jobs for this chat"));
+            return;
+        }
+
+        await this.send(message, jobs.map(formatTelegramJobLine).join("\n"));
+    }
+
+    private async handleSchedule(message: TelegramMessage, args: string[]): Promise<void> {
+        const parsed = parseScheduleArgs(args);
+        if (!parsed.ok) {
+            await this.send(message, bridgePlain(parsed.message));
+            return;
+        }
+
+        const state = await this.loadState();
+        const id = surfaceID(message);
+        const surface = findSurface(state, id);
+        if (!surface?.activeSessionID) {
+            await this.send(message, bridgePlain("no active session. Use /oc attach latest or /oc new first."));
+            return;
+        }
+
+        const now = this.now();
+        const timestamp = now.toISOString();
+        const job: BridgeScheduledJobState = {
+            id: createScheduledJobID(state, now),
+            platform: "telegram",
+            surfaceID: id,
+            surface: surface.surface,
+            sessionID: surface.activeSessionID,
+            prompt: parsed.prompt,
+            intervalMinutes: parsed.intervalMinutes,
+            nextRunAt: nextScheduledRun(now, parsed.intervalMinutes),
+            lastRunAt: null,
+            lastError: null,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        };
+        state.jobs.push(job);
+        state.updatedAt = timestamp;
+
+        await writeBridgeState(this.config.statePath, state);
+        await this.send(message, bridgeLine(`scheduled ${markdownCode(job.id)} every ${markdownCode(formatScheduleInterval(job.intervalMinutes))} for ${markdownCode(job.sessionID)}`));
+    }
+
+    private async handleUnschedule(message: TelegramMessage, jobID: string | undefined): Promise<void> {
+        if (!jobID) {
+            await this.send(message, bridgePlain("job ID is required"));
+            return;
+        }
+
+        const state = await this.loadState();
+        const index = state.jobs.findIndex((job) => job.surfaceID === surfaceID(message) && job.id === jobID);
+        if (index === -1) {
+            await this.send(message, bridgePlain("scheduled job not found for this chat"));
+            return;
+        }
+
+        state.jobs.splice(index, 1);
+        state.updatedAt = this.now().toISOString();
+
+        await writeBridgeState(this.config.statePath, state);
+        await this.send(message, bridgeLine(`unscheduled ${markdownCode(jobID)}`));
+    }
+
+    private async handleRunNow(message: TelegramMessage, jobID: string | undefined): Promise<void> {
+        if (!jobID) {
+            await this.send(message, bridgePlain("job ID is required"));
+            return;
+        }
+
+        const state = await this.loadState();
+        const job = state.jobs.find((entry) => entry.surfaceID === surfaceID(message) && entry.id === jobID);
+        if (!job) {
+            await this.send(message, bridgePlain("scheduled job not found for this chat"));
+            return;
+        }
+
+        const now = this.now();
+        await this.telegram.sendChatAction({ chatID: message.chatID, threadID: message.threadID, action: "typing" });
+        try {
+            await this.opencode.sendPrompt({ sessionID: job.sessionID, text: job.prompt });
+            recordScheduledJobRun(job, now, null);
+            state.updatedAt = now.toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(message, bridgeLine(`ran scheduled job ${markdownCode(job.id)} for ${markdownCode(job.sessionID)}`));
+        } catch (error) {
+            const messageText = scheduleErrorMessage(error);
+            recordScheduledJobRun(job, now, messageText);
+            state.updatedAt = now.toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(message, bridgeLine(`scheduled job ${markdownCode(job.id)} failed: ${escapeTelegramMarkdown(messageText)}`));
+        }
     }
 
     private async handlePermissionReply(message: TelegramMessage, command: "allow" | "always" | "deny", args: string[]): Promise<void> {
@@ -347,7 +490,7 @@ function parseCommand(text: string): ParsedCommand | null {
     }
 
     return {
-        name: directCommand,
+        name: directCommand === "run_now" ? "run-now" : directCommand,
         args: parts.slice(1),
     };
 }
@@ -426,6 +569,19 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
     }
 
     state.bindings[index] = binding;
+}
+
+function jobsForSurface(state: BridgeState, id: string): BridgeScheduledJobState[] {
+    return state.jobs.filter((job) => job.surfaceID === id);
+}
+
+function formatTelegramJobLine(job: BridgeScheduledJobState): string {
+    const line = bridgeLine(`${markdownCode(job.id)} every ${markdownCode(formatScheduleInterval(job.intervalMinutes))} next ${markdownCode(job.nextRunAt)} session ${markdownCode(job.sessionID)}`);
+    if (!job.lastError) {
+        return line;
+    }
+
+    return `${line} ${escapeTelegramMarkdown("last error")}: ${escapeTelegramMarkdown(job.lastError)}`;
 }
 
 function formatSessionLine(session: OpenCodeSession): string {

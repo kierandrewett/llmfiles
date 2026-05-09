@@ -59,9 +59,9 @@ export class ScheduledPromptRunner {
 
         try {
             await this.opencode.sendPrompt({ sessionID: storedJob.sessionID, text: storedJob.prompt });
-            markJobRun(storedJob, now, null);
+            recordScheduledJobRun(storedJob, now, null);
         } catch (error) {
-            markJobRun(storedJob, now, errorMessage(error));
+            recordScheduledJobRun(storedJob, now, scheduleErrorMessage(error));
         }
     }
 }
@@ -112,12 +112,21 @@ export function createScheduledJobID(state: BridgeState, now: Date): string {
     }
 }
 
-function markJobRun(job: BridgeScheduledJobState, now: Date, error: string | null): void {
+export function recordScheduledJobRun(job: BridgeScheduledJobState, now: Date, error: string | null): void {
     const timestamp = now.toISOString();
     job.lastRunAt = timestamp;
     job.lastError = error;
     job.nextRunAt = nextScheduledRun(now, job.intervalMinutes);
     job.updatedAt = timestamp;
+}
+
+export function scheduleErrorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.length <= ERROR_SUMMARY_LIMIT) {
+        return message;
+    }
+
+    return `${message.slice(0, ERROR_SUMMARY_LIMIT - 3)}...`;
 }
 
 function isDue(job: BridgeScheduledJobState, now: Date): boolean {
@@ -147,13 +156,4 @@ function parseDurationMinutes(value: string): number | null {
 
 function addMinutes(date: Date, minutes: number): Date {
     return new Date(date.getTime() + minutes * 60_000);
-}
-
-function errorMessage(error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.length <= ERROR_SUMMARY_LIMIT) {
-        return message;
-    }
-
-    return `${message.slice(0, ERROR_SUMMARY_LIMIT - 3)}...`;
 }
