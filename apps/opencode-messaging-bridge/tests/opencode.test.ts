@@ -50,6 +50,35 @@ describe("OpenCodeHttpClient", () => {
         assert.deepEqual(session, { id: "ses_new", title: "New session", directory: null, time: null });
     });
 
+    it("gets sessions by ID", async () => {
+        const { client, requests } = createClient([{ id: "ses_abc", title: "Example" }]);
+
+        const session = await client.getSession({ sessionID: "ses_abc" });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/session/ses_abc");
+        assert.equal(requests[0]?.init.method, "GET");
+        assert.deepEqual(session, { id: "ses_abc", title: "Example", directory: null, time: null });
+    });
+
+    it("sends prompts asynchronously", async () => {
+        const { client, requests } = createClient([null]);
+
+        await client.sendPrompt({ sessionID: "ses_abc", text: "hello" });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/session/ses_abc/prompt_async");
+        assert.equal(requests[0]?.init.method, "POST");
+        assert.equal(requests[0]?.init.body, JSON.stringify({ parts: [{ type: "text", text: "hello" }] }));
+    });
+
+    it("aborts sessions", async () => {
+        const { client, requests } = createClient([true]);
+
+        await client.abortSession({ sessionID: "ses_abc" });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/session/ses_abc/abort");
+        assert.equal(requests[0]?.init.method, "POST");
+    });
+
     it("throws structured errors for failed requests", async () => {
         const { client } = createClient([{ error: "nope" }], 500);
 

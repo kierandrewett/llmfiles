@@ -25,6 +25,22 @@ export interface CreateSessionInput {
     directory?: string;
 }
 
+export interface GetSessionInput {
+    sessionID: string;
+    directory?: string;
+}
+
+export interface SendPromptInput {
+    sessionID: string;
+    text: string;
+    directory?: string;
+}
+
+export interface AbortSessionInput {
+    sessionID: string;
+    directory?: string;
+}
+
 export class OpenCodeHttpError extends Error {
     readonly status: number;
     readonly body: string;
@@ -87,6 +103,38 @@ export class OpenCodeHttpClient {
         });
 
         return parseSession(value, "OpenCode create session response");
+    }
+
+    async getSession(input: GetSessionInput): Promise<OpenCodeSession> {
+        const value = await this.requestJson(`/session/${encodeURIComponent(input.sessionID)}`, {
+            method: "GET",
+            query: {
+                directory: input.directory,
+            },
+        });
+
+        return parseSession(value, "OpenCode get session response");
+    }
+
+    async sendPrompt(input: SendPromptInput): Promise<void> {
+        await this.requestJson(`/session/${encodeURIComponent(input.sessionID)}/prompt_async`, {
+            method: "POST",
+            query: {
+                directory: input.directory,
+            },
+            body: {
+                parts: [{ type: "text", text: input.text }],
+            },
+        });
+    }
+
+    async abortSession(input: AbortSessionInput): Promise<void> {
+        await this.requestJson(`/session/${encodeURIComponent(input.sessionID)}/abort`, {
+            method: "POST",
+            query: {
+                directory: input.directory,
+            },
+        });
     }
 
     private async requestJson(route: string, options: RequestOptions): Promise<unknown> {
