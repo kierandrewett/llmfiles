@@ -29,6 +29,49 @@ describe("runCli", () => {
         ]);
     });
 
+    it("starts and stops the managed OpenCode process around OpenCode commands", async () => {
+        const { env, output, client, processManager } = await createFixture();
+        env.OPENCODE_BRIDGE_MANAGE_OPENCODE = "1";
+
+        const exitCode = await runCli(
+            ["status"],
+            { env, stdout: output.stdout, stderr: output.stderr, client, processManager },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.deepEqual(processManager.calls, ["start", "stop"]);
+    });
+
+    it("stops the managed OpenCode process when an OpenCode command fails", async () => {
+        const { env, output, processManager } = await createFixture();
+        env.OPENCODE_BRIDGE_MANAGE_OPENCODE = "1";
+
+        const exitCode = await runCli(
+            ["status"],
+            {
+                env,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                client: {
+                    async health(): Promise<OpenCodeHealth> {
+                        throw new Error("health failed");
+                    },
+                    async listSessions(): Promise<OpenCodeSession[]> {
+                        return [];
+                    },
+                    async createSession(): Promise<OpenCodeSession> {
+                        return { id: "ses_new", title: null, directory: null, time: null };
+                    },
+                },
+                processManager,
+            },
+        );
+
+        assert.equal(exitCode, 1);
+        assert.deepEqual(processManager.calls, ["start", "stop"]);
+        assert.deepEqual(output.errors, ["[bridge] health failed"]);
+    });
+
     it("prints recent sessions", async () => {
         const { env, output, client } = await createFixture({
             sessions: [{ id: "ses_abc", title: "Example", directory: null, time: null }],
@@ -104,6 +147,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     };
     client: FixtureClient;
     telegramPoller: { calls: number; runOnce(): Promise<number> };
+    processManager: { calls: string[]; start(): Promise<string>; stop(): Promise<void> };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bridge-cli-test-"));
     tempDirs.push(dir);
@@ -140,6 +184,16 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             async runOnce(): Promise<number> {
                 this.calls += 1;
                 return options.telegramProcessed ?? 0;
+            },
+        },
+        processManager: {
+            calls: [] as string[],
+            async start(): Promise<string> {
+                this.calls.push("start");
+                return "http://127.0.0.1:4096";
+            },
+            async stop(): Promise<void> {
+                this.calls.push("stop");
             },
         },
     };

@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 
 import { type Env, loadBridgeConfig } from "./config.js";
 import { OpenCodeEventPump } from "./opencode-event-pump.js";
+import { OpenCodeProcessManager } from "./opencode-process.js";
 import { OpenCodeHttpClient, type OpenCodeHealth, type OpenCodeSession } from "./opencode.js";
 import { loadOrCreateBridgeState } from "./state.js";
 import { TelegramEventRelay } from "./telegram-event-relay.js";
@@ -25,6 +26,7 @@ export interface CliDependencies {
     client?: OpenCodeClientLike;
     telegramPoller?: TelegramPollerLike;
     eventPump?: OpenCodeEventPumpLike;
+    processManager?: OpenCodeProcessManagerLike;
 }
 
 export interface TelegramPollerLike {
@@ -33,6 +35,11 @@ export interface TelegramPollerLike {
 
 export interface OpenCodeEventPumpLike {
     runOnce(): Promise<number>;
+}
+
+export interface OpenCodeProcessManagerLike {
+    start(): Promise<string>;
+    stop(): Promise<void>;
 }
 
 export async function runCli(argv = process.argv.slice(2), dependencies: CliDependencies = {}): Promise<number> {
@@ -52,45 +59,58 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
         const client = dependencies.client ?? new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
 
         if (command === "telegram-once") {
-            const processed = await telegramPoller(config, dependencies).runOnce();
-            stdout(`[bridge] telegram processed ${processed} update(s)`);
-            return 0;
+            const poller = telegramPoller(config, dependencies);
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const processed = await poller.runOnce();
+                stdout(`[bridge] telegram processed ${processed} update(s)`);
+                return 0;
+            });
         }
 
         if (command === "telegram") {
-            await Promise.all([
-                runTelegramLoop(telegramPoller(config, dependencies), stdout, stderr),
-                runOpenCodeEventLoop(openCodeEventPump(config, dependencies), stdout, stderr),
-            ]);
-            return 0;
+            const poller = telegramPoller(config, dependencies);
+            const pump = openCodeEventPump(config, dependencies);
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                await Promise.all([
+                    runTelegramLoop(poller, stdout, stderr),
+                    runOpenCodeEventLoop(pump, stdout, stderr),
+                ]);
+                return 0;
+            });
         }
 
         if (command === "status") {
-            const health = await client.health();
-            stdout(`[bridge] OpenCode healthy: ${String(health.healthy)}`);
-            stdout(`[bridge] OpenCode version: ${health.version}`);
-            stdout(`[bridge] state: ${config.statePath}`);
-            return 0;
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const health = await client.health();
+                stdout(`[bridge] OpenCode healthy: ${String(health.healthy)}`);
+                stdout(`[bridge] OpenCode version: ${health.version}`);
+                stdout(`[bridge] state: ${config.statePath}`);
+                return 0;
+            });
         }
 
         if (command === "sessions") {
-            const sessions = await client.listSessions({ limit: 20 });
-            if (sessions.length === 0) {
-                stdout("[bridge] no sessions found");
-                return 0;
-            }
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const sessions = await client.listSessions({ limit: 20 });
+                if (sessions.length === 0) {
+                    stdout("[bridge] no sessions found");
+                    return 0;
+                }
 
-            for (const session of sessions) {
-                stdout(formatSessionLine(session));
-            }
-            return 0;
+                for (const session of sessions) {
+                    stdout(formatSessionLine(session));
+                }
+                return 0;
+            });
         }
 
         if (command === "new") {
-            const title = argv.slice(1).join(" ").trim();
-            const session = await client.createSession(title ? { title } : {});
-            stdout(`[bridge] created session ${formatSessionLine(session)}`);
-            return 0;
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const title = argv.slice(1).join(" ").trim();
+                const session = await client.createSession(title ? { title } : {});
+                stdout(`[bridge] created session ${formatSessionLine(session)}`);
+                return 0;
+            });
         }
 
         stderr(`[bridge] unknown command: ${command}`);
@@ -101,6 +121,34 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
         stderr(`[bridge] ${message}`);
         return 1;
     }
+}
+
+async function withOpenCodeProcess(
+    config: ReturnType<typeof loadBridgeConfig>,
+    dependencies: CliDependencies,
+    action: () => Promise<number>,
+): Promise<number> {
+    const manager = opencodeProcessManager(config, dependencies);
+    await manager.start();
+    try {
+        return await action();
+    } finally {
+        await manager.stop();
+    }
+}
+
+function opencodeProcessManager(
+    config: ReturnType<typeof loadBridgeConfig>,
+    dependencies: CliDependencies,
+): OpenCodeProcessManagerLike {
+    if (dependencies.processManager) {
+        return dependencies.processManager;
+    }
+
+    return new OpenCodeProcessManager({
+        baseUrl: config.opencode.baseUrl,
+        process: config.opencode.process,
+    });
 }
 
 function formatSessionLine(session: OpenCodeSession): string {
