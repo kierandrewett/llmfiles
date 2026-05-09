@@ -42,6 +42,12 @@ describe("Discord command parsing", () => {
 
         assert.deepEqual(parsed, { name: "deny", args: ["per_123", "too risky"], text: "per_123 too risky" });
     });
+
+    it("parses schedule slash commands", () => {
+        const parsed = parseDiscordSlashCommand(interaction("user-id", "control-channel", "schedule", "text", "every 15m check status"), "oc");
+
+        assert.deepEqual(parsed, { name: "schedule", args: ["every", "15m", "check", "status"], text: "every 15m check status" });
+    });
 });
 
 describe("DiscordBridgeRouter", () => {
@@ -102,6 +108,61 @@ describe("DiscordBridgeRouter", () => {
         assert.deepEqual(fixture.discord.typing, ["control-channel"]);
         assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "hello there" }]);
         assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] prompt sent to ses_abc"]);
+    });
+
+    it("schedules prompts against the active Discord session", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "discord:control-channel", platform: "discord", surface: { channelID: "control-channel", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "!oc schedule every 15m check status"));
+        await router.handleMessage(message("user-id", "control-channel", "!oc jobs"));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.equal(read.jobs.length, 1);
+        assert.equal(read.jobs[0]?.id, "job_20260509T000000000Z_1");
+        assert.equal(read.jobs[0]?.sessionID, "ses_abc");
+        assert.equal(read.jobs[0]?.prompt, "check status");
+        assert.equal(read.jobs[0]?.nextRunAt, "2026-05-09T00:15:00.000Z");
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), [
+            "[bridge] scheduled job_20260509T000000000Z_1 every 15m for ses_abc",
+            "[bridge] job_20260509T000000000Z_1 every 15m next 2026-05-09T00:15:00.000Z session ses_abc",
+        ]);
+    });
+
+    it("runs and unschedules Discord scheduled prompts by job ID", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "discord:control-channel", platform: "discord", surface: { channelID: "control-channel", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        state.jobs.push({
+            id: "job_1",
+            platform: "discord",
+            surfaceID: "discord:control-channel",
+            surface: { channelID: "control-channel", threadID: null },
+            sessionID: "ses_abc",
+            prompt: "check status",
+            intervalMinutes: 15,
+            nextRunAt: "2026-05-09T00:15:00.000Z",
+            lastRunAt: null,
+            lastError: null,
+            createdAt: state.updatedAt,
+            updatedAt: state.updatedAt,
+        });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "!oc run-now job_1"));
+        await router.handleMessage(message("user-id", "control-channel", "!oc unschedule job_1"));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "check status" }]);
+        assert.deepEqual(read.jobs, []);
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), [
+            "[bridge] ran scheduled job job_1 for ses_abc",
+            "[bridge] unscheduled job_1",
+        ]);
     });
 
     it("routes permission decisions to OpenCode", async () => {

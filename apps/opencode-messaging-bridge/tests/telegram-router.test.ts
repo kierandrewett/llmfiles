@@ -156,6 +156,61 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* prompt sent to `ses_abc`"]);
     });
 
+    it("schedules prompts against the active Telegram session", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "telegram:456:", platform: "telegram", surface: { chatID: "456", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc schedule every 15m check status"));
+        await router.handleUpdate(update("123", "456", "/oc jobs"));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.equal(read.jobs.length, 1);
+        assert.equal(read.jobs[0]?.id, "job_20260509T000000000Z_1");
+        assert.equal(read.jobs[0]?.sessionID, "ses_abc");
+        assert.equal(read.jobs[0]?.prompt, "check status");
+        assert.equal(read.jobs[0]?.nextRunAt, "2026-05-09T00:15:00.000Z");
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
+            "*\\[bridge\\]* scheduled `job_20260509T000000000Z_1` every `15m` for `ses_abc`",
+            "*\\[bridge\\]* `job_20260509T000000000Z_1` every `15m` next `2026-05-09T00:15:00.000Z` session `ses_abc`",
+        ]);
+    });
+
+    it("runs and unschedules Telegram scheduled prompts by job ID", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "telegram:456:", platform: "telegram", surface: { chatID: "456", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        state.jobs.push({
+            id: "job_1",
+            platform: "telegram",
+            surfaceID: "telegram:456:",
+            surface: { chatID: "456", threadID: null },
+            sessionID: "ses_abc",
+            prompt: "check status",
+            intervalMinutes: 15,
+            nextRunAt: "2026-05-09T00:15:00.000Z",
+            lastRunAt: null,
+            lastError: null,
+            createdAt: state.updatedAt,
+            updatedAt: state.updatedAt,
+        });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc run-now job_1"));
+        await router.handleUpdate(update("123", "456", "/oc unschedule job_1"));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "check status" }]);
+        assert.deepEqual(read.jobs, []);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
+            "*\\[bridge\\]* ran scheduled job `job_1` for `ses_abc`",
+            "*\\[bridge\\]* unscheduled `job_1`",
+        ]);
+    });
+
     it("routes permission decisions to OpenCode", async () => {
         const fixture = await createFixture();
         const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
