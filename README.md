@@ -34,6 +34,8 @@ just install-local-skill ntfy /tmp/skills     # one local skill to any target
 
 Existing real files are skipped. Existing symlinks are relinked.
 
+If `~/.config/opencode/plugins` already exists as a real directory, `just install-opencode-plugins` links each repo-managed plugin file into that directory and leaves any existing real files alone.
+
 ## OpenCode remote control
 
 The standalone bridge can run in Docker Compose and let an allowlisted Telegram chat or Discord channel control an

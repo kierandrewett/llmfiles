@@ -46,8 +46,16 @@ install-opencode target="":
 
 # Opt in to OpenCode plugins.
 install-opencode-plugins target="":
-    @target="{{target}}"; target="${target:-$HOME/.config/opencode}"; \
-        just --justfile "{{repo}}/justfile" _link "{{repo}}/plugins/opencode" "$target/plugins"
+	@target="{{target}}"; target="${target:-$HOME/.config/opencode}"; \
+		plugin_target="$target/plugins"; \
+		if [ -d "$plugin_target" ] && [ ! -L "$plugin_target" ]; then \
+			for src in "{{repo}}"/plugins/opencode/*; do \
+				[ -e "$src" ] || continue; \
+				just --justfile "{{repo}}/justfile" _link "$src" "$plugin_target/$(basename "$src")"; \
+			done; \
+		else \
+			just --justfile "{{repo}}/justfile" _link "{{repo}}/plugins/opencode" "$plugin_target"; \
+		fi
 
 # Opt in to the vendored skill collections for OpenCode.
 install-opencode-skills target="":
