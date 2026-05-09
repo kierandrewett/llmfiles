@@ -1,4 +1,5 @@
 import type { OpenCodeEvent } from "./opencode.js";
+import { permissionRequestFromEvent, type OpenCodePermissionRequest } from "./permissions.js";
 import { type BridgeBindingState, loadOrCreateBridgeState } from "./state.js";
 import {
     TELEGRAM_MARKDOWN_PARSE_MODE,
@@ -58,6 +59,12 @@ export class TelegramEventRelay {
     }
 
     async handleEvent(event: OpenCodeEvent): Promise<void> {
+        const permission = permissionRequestFromEvent(event);
+        if (permission) {
+            await this.relayPermission(permission);
+            return;
+        }
+
         if (event.type === "message.part.updated") {
             this.handlePartUpdated(event);
             return;
@@ -188,6 +195,27 @@ export class TelegramEventRelay {
         return state.bindings.filter((binding) => binding.platform === "telegram" && binding.sessionID === sessionID);
     }
 
+    private async relayPermission(permission: OpenCodePermissionRequest): Promise<void> {
+        for (const binding of await this.telegramBindings(permission.sessionID)) {
+            await this.sendPermission(binding, permission);
+        }
+    }
+
+    private async sendPermission(binding: BridgeBindingState, permission: OpenCodePermissionRequest): Promise<void> {
+        if (!binding.surface.chatID) {
+            return;
+        }
+
+        for (const chunk of chunkTelegramText(formatTelegramPermission(permission))) {
+            await this.telegram.sendMessage({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                text: chunk,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+        }
+    }
+
     private async updatePreview(key: string, binding: BridgeBindingState, text: string): Promise<void> {
         if (!binding.surface.chatID) {
             return;
@@ -299,6 +327,44 @@ export class TelegramEventRelay {
 
 function previewText(text: string): string {
     return escapeTelegramMarkdown(chunkTelegramText(text, TELEGRAM_PREVIEW_LIMIT)[0] ?? "");
+}
+
+function formatTelegramPermission(permission: OpenCodePermissionRequest): string {
+    const patternText = permission.patterns.length > 0 ? permission.patterns.join(", ") : "(none)";
+
+    return [
+        bridgePlain("permission requested"),
+        bridgeField("id", permission.id),
+        bridgeField("session", permission.sessionID),
+        bridgeTextField("request", permission.title),
+        bridgeField("permission", permission.permission),
+        bridgeField(permission.patterns.length === 1 ? "pattern" : "patterns", patternText),
+        bridgeLine(`${escapeTelegramMarkdown("reply")}: ${markdownCode(`/oc allow ${permission.id}`)}, ${markdownCode(`/oc always ${permission.id}`)}, or ${markdownCode(`/oc deny ${permission.id}`)}`),
+    ].join("\n");
+}
+
+function bridgePlain(text: string): string {
+    return bridgeLine(escapeTelegramMarkdown(text));
+}
+
+function bridgeField(label: string, value: string): string {
+    return bridgeLine(`${escapeTelegramMarkdown(label)}: ${markdownCode(value)}`);
+}
+
+function bridgeTextField(label: string, value: string): string {
+    return bridgeLine(`${escapeTelegramMarkdown(label)}: ${escapeTelegramMarkdown(value)}`);
+}
+
+function bridgeLine(text: string): string {
+    return `${markdownBold("[bridge]")} ${text}`;
+}
+
+function markdownBold(text: string): string {
+    return `*${escapeTelegramMarkdown(text)}*`;
+}
+
+function markdownCode(text: string): string {
+    return `\`${text.replace(/[\\`]/g, (character) => `\\${character}`)}\``;
 }
 
 function deliveryKeyForBinding(streamKey: string, binding: BridgeBindingState): string {

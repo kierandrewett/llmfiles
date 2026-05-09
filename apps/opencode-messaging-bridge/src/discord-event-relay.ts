@@ -1,5 +1,6 @@
 import type { SendDiscordMessageInput } from "./discord.js";
 import type { OpenCodeEvent } from "./opencode.js";
+import { permissionRequestFromEvent, type OpenCodePermissionRequest } from "./permissions.js";
 import { type BridgeBindingState, loadOrCreateBridgeState } from "./state.js";
 
 const DEFAULT_FLUSH_DELAY_MS = 1200;
@@ -45,6 +46,12 @@ export class DiscordEventRelay {
     }
 
     async handleEvent(event: OpenCodeEvent): Promise<void> {
+        const permission = permissionRequestFromEvent(event);
+        if (permission) {
+            await this.relayPermission(permission);
+            return;
+        }
+
         if (event.type === "message.part.updated") {
             this.handlePartUpdated(event);
             return;
@@ -156,6 +163,12 @@ export class DiscordEventRelay {
         return state.bindings.filter((binding) => binding.platform === "discord" && binding.sessionID === sessionID);
     }
 
+    private async relayPermission(permission: OpenCodePermissionRequest): Promise<void> {
+        for (const binding of await this.discordBindings(permission.sessionID)) {
+            await this.send(binding, formatDiscordPermission(permission));
+        }
+    }
+
     private async send(binding: BridgeBindingState, content: string): Promise<void> {
         if (!binding.surface.channelID) {
             return;
@@ -166,6 +179,20 @@ export class DiscordEventRelay {
             content,
         });
     }
+}
+
+function formatDiscordPermission(permission: OpenCodePermissionRequest): string {
+    const patternText = permission.patterns.length > 0 ? permission.patterns.join(", ") : "(none)";
+
+    return [
+        "[bridge] permission requested",
+        `[bridge] id: ${permission.id}`,
+        `[bridge] session: ${permission.sessionID}`,
+        `[bridge] request: ${permission.title}`,
+        `[bridge] permission: ${permission.permission}`,
+        `[bridge] ${permission.patterns.length === 1 ? "pattern" : "patterns"}: ${patternText}`,
+        `[bridge] reply: !oc allow ${permission.id}, !oc always ${permission.id}, or !oc deny ${permission.id}`,
+    ].join("\n");
 }
 
 function sessionIDFromEvent(event: OpenCodeEvent): string | null {
