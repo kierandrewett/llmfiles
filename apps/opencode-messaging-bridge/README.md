@@ -358,6 +358,18 @@ docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge
 
 Docker Compose is the preferred server path for the Telegram or Discord bridge.
 
+Fast path if you just want one file to edit:
+
+```bash
+just opencode-bridge-config
+cp compose.example.yaml compose.local.yaml
+$EDITOR compose.local.yaml
+docker compose -f compose.local.yaml up -d --build
+docker compose -f compose.local.yaml logs -f opencode-bridge
+```
+
+`compose.local.yaml` is ignored by git. Put the real Discord or Telegram token values there if you use this path.
+
 Build a Docker-safe OpenCode config directory first. This copies your OpenCode config with symlinks resolved, so the
 container does not need a `llmfiles` mount:
 

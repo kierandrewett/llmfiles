@@ -11,3 +11,5 @@ cache/
 *.p12
 *.pfx
 *.zip
+compose.local.yaml
+compose.local.yml
