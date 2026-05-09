@@ -5,7 +5,7 @@ import { DiscordEventRelay } from "./discord-event-relay.js";
 import { DiscordGatewayRunner } from "./discord-gateway.js";
 import { DiscordBridgeRouter } from "./discord-router.js";
 import { DiscordBotApiClient } from "./discord.js";
-import { OpenCodeEventPump } from "./opencode-event-pump.js";
+import { OpenCodeEventPump, type OpenCodeEventHandler } from "./opencode-event-pump.js";
 import { OpenCodeProcessManager } from "./opencode-process.js";
 import { OpenCodeHttpClient, type OpenCodeHealth, type OpenCodeSession } from "./opencode.js";
 import { loadOrCreateBridgeState } from "./state.js";
@@ -99,11 +99,39 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
             });
         }
 
+        if (command === "telegram+discord-once" || command === "discord+telegram-once") {
+            const poller = telegramPoller(config, dependencies);
+            const gateway = discordGateway(config, dependencies);
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const [telegramProcessed, discordProcessed] = await Promise.all([
+                    poller.runOnce(),
+                    gateway.runOnce(),
+                ]);
+                stdout(`[bridge] telegram processed ${telegramProcessed} update(s)`);
+                stdout(`[bridge] discord processed ${discordProcessed} gateway dispatch event(s)`);
+                return 0;
+            });
+        }
+
         if (command === "discord") {
             const gateway = discordGateway(config, dependencies);
             const pump = openCodeEventPump(config, dependencies, "discord");
             return await withOpenCodeProcess(config, dependencies, async () => {
                 await Promise.all([
+                    runDiscordGatewayLoop(gateway, stdout, stderr),
+                    runOpenCodeEventLoop(pump, stdout, stderr),
+                ]);
+                return 0;
+            });
+        }
+
+        if (command === "telegram+discord" || command === "discord+telegram") {
+            const poller = telegramPoller(config, dependencies);
+            const gateway = discordGateway(config, dependencies);
+            const pump = openCodeEventPump(config, dependencies, "telegram+discord");
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                await Promise.all([
+                    runTelegramLoop(poller, stdout, stderr),
                     runDiscordGatewayLoop(gateway, stdout, stderr),
                     runOpenCodeEventLoop(pump, stdout, stderr),
                 ]);
@@ -198,6 +226,8 @@ function printHelp(output: (line: string) => void): void {
     output("  telegram            Run Telegram long polling continuously");
     output("  discord-once        Connect to Discord Gateway once and process dispatches until close");
     output("  discord             Run Discord Gateway continuously");
+    output("  telegram+discord-once  Run one Telegram poll and one Discord Gateway cycle");
+    output("  telegram+discord    Run Telegram and Discord continuously");
 }
 
 function telegramPoller(
@@ -219,7 +249,7 @@ function telegramPoller(
 function openCodeEventPump(
     config: ReturnType<typeof loadBridgeConfig>,
     dependencies: CliDependencies,
-    platform: "telegram" | "discord",
+    platform: "telegram" | "discord" | "telegram+discord",
 ): OpenCodeEventPumpLike {
     if (dependencies.eventPump) {
         return dependencies.eventPump;
@@ -229,6 +259,27 @@ function openCodeEventPump(
     if (platform === "telegram") {
         const telegram = new TelegramBotApiClient({ botToken: telegramBotToken(config) });
         const handler = new TelegramEventRelay({ statePath: config.statePath, telegram });
+
+        return new OpenCodeEventPump({ source, handler });
+    }
+
+    if (platform === "telegram+discord") {
+        const telegram = new TelegramBotApiClient({ botToken: telegramBotToken(config) });
+        const discord = new DiscordBotApiClient({
+            botToken: discordBotToken(config),
+            maxMessageChars: config.discord.maxMessageChars,
+        });
+        const handlers: OpenCodeEventHandler[] = [
+            new TelegramEventRelay({ statePath: config.statePath, telegram }),
+            new DiscordEventRelay({ statePath: config.statePath, discord }),
+        ];
+        const handler: OpenCodeEventHandler = {
+            async handleEvent(event) {
+                for (const relay of handlers) {
+                    await relay.handleEvent(event);
+                }
+            },
+        };
 
         return new OpenCodeEventPump({ source, handler });
     }

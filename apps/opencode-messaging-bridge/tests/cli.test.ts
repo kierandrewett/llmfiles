@@ -142,6 +142,32 @@ describe("runCli", () => {
         assert.deepEqual(output.lines, ["[bridge] discord processed 3 gateway dispatch event(s)"]);
     });
 
+    it("runs one Telegram poll and one Discord Gateway cycle when both surfaces are configured", async () => {
+        const { env, output, telegramPoller, discordGateway } = await createFixture({
+            telegramProcessed: 2,
+            discordProcessed: 3,
+        });
+
+        env.OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN = "telegram-token";
+        env.OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS = "123";
+        env.OPENCODE_BRIDGE_DISCORD_BOT_TOKEN = "discord-token";
+        env.OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS = "123";
+        env.OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID = "456";
+
+        const exitCode = await runCli(
+            ["telegram+discord-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, telegramPoller, discordGateway },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.equal(telegramPoller.calls, 1);
+        assert.equal(discordGateway.calls, 1);
+        assert.deepEqual(output.lines, [
+            "[bridge] telegram processed 2 update(s)",
+            "[bridge] discord processed 3 gateway dispatch event(s)",
+        ]);
+    });
+
     it("refuses Discord Gateway when Discord is not configured", async () => {
         const { env, output, discordGateway } = await createFixture();
 
