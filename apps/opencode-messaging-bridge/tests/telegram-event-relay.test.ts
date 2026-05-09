@@ -112,6 +112,30 @@ describe("TelegramEventRelay", () => {
         ]);
         assert.deepEqual(fixture.telegram.drafts, []);
     });
+
+    it("relays permission requests to Telegram bindings", async () => {
+        const fixture = await createFixture();
+        const relay = new TelegramEventRelay(fixture.dependencies);
+
+        await relay.handleEvent(permissionEvent("ses_abc"));
+
+        assert.deepEqual(fixture.telegram.sent, [
+            {
+                chatID: "456",
+                threadID: null,
+                text: [
+                    "*\\[bridge\\]* permission requested",
+                    "*\\[bridge\\]* id: `per_123`",
+                    "*\\[bridge\\]* session: `ses_abc`",
+                    "*\\[bridge\\]* request: Run bash command",
+                    "*\\[bridge\\]* permission: `bash`",
+                    "*\\[bridge\\]* pattern: `git status`",
+                    "*\\[bridge\\]* reply: `/oc allow per_123`, `/oc always per_123`, or `/oc deny per_123`",
+                ].join("\n"),
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            },
+        ]);
+    });
 });
 
 interface FixtureOptions {
@@ -179,6 +203,21 @@ function textEvent(sessionID: string, partID: string, text: string): OpenCodeEve
                 type: "text",
                 text,
             },
+        },
+    };
+}
+
+function permissionEvent(sessionID: string): OpenCodeEvent {
+    return {
+        type: "permission.updated",
+        properties: {
+            id: "per_123",
+            sessionID,
+            type: "bash",
+            pattern: "git status",
+            title: "Run bash command",
+            metadata: {},
+            time: { created: 1 },
         },
     };
 }

@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { type BridgeConfig } from "../src/config.js";
-import { type OpenCodeHealth, type OpenCodeSession } from "../src/opencode.js";
+import { type OpenCodeHealth, type OpenCodePermissionResponse, type OpenCodeSession } from "../src/opencode.js";
 import { readBridgeState, writeBridgeState, createDefaultBridgeState } from "../src/state.js";
 import { TelegramBridgeRouter } from "../src/telegram-router.js";
 import {
@@ -156,6 +156,39 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* prompt sent to `ses_abc`"]);
     });
 
+    it("routes permission decisions to OpenCode", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "telegram:456:", platform: "telegram", surface: { chatID: "456", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc allow per_once"));
+        await router.handleUpdate(update("123", "456", "/oc always per_always"));
+        await router.handleUpdate(update("123", "456", "/oc deny per_reject too risky"));
+
+        assert.deepEqual(fixture.opencode.permissionReplies, [
+            { sessionID: "ses_abc", permissionID: "per_once", response: "once" },
+            { sessionID: "ses_abc", permissionID: "per_always", response: "always" },
+            { sessionID: "ses_abc", permissionID: "per_reject", response: "reject", message: "too risky" },
+        ]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
+            "*\\[bridge\\]* permission `once` sent for `per_once`",
+            "*\\[bridge\\]* permission `always` sent for `per_always`",
+            "*\\[bridge\\]* permission `reject` sent for `per_reject`",
+        ]);
+    });
+
+    it("rejects permission commands without a permission ID", async () => {
+        const fixture = await createFixture();
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc allow"));
+
+        assert.deepEqual(fixture.opencode.permissionReplies, []);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* permission ID is required"]);
+    });
+
     it("keeps reactions best-effort so Telegram reaction errors do not block commands", async () => {
         const fixture = await createFixture({ failReactions: true });
         const router = new TelegramBridgeRouter(fixture.dependencies);
@@ -180,12 +213,14 @@ interface FakeOpenCode {
     healthCalls: number;
     createdTitles: string[];
     prompts: Array<{ sessionID: string; text: string }>;
+    permissionReplies: Array<{ sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }>;
     health(): Promise<OpenCodeHealth>;
     listSessions(options?: { limit?: number }): Promise<OpenCodeSession[]>;
     getSession(input: { sessionID: string }): Promise<OpenCodeSession>;
     createSession(input?: { title?: string }): Promise<OpenCodeSession>;
     sendPrompt(input: { sessionID: string; text: string }): Promise<void>;
     abortSession(input: { sessionID: string }): Promise<void>;
+    replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void>;
 }
 
 async function createFixture(options: FixtureOptions = {}): Promise<{
@@ -233,6 +268,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         healthCalls: 0,
         createdTitles: [],
         prompts: [],
+        permissionReplies: [],
         async health(): Promise<OpenCodeHealth> {
             opencode.healthCalls += 1;
             return { healthy: true, version: "1.3.17" };
@@ -252,6 +288,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         },
         async abortSession(): Promise<void> {
             return undefined;
+        },
+        async replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void> {
+            opencode.permissionReplies.push(input);
         },
     };
 

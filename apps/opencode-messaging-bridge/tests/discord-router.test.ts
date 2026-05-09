@@ -7,7 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import { type BridgeConfig } from "../src/config.js";
 import type { DiscordInteraction, DiscordMessage, PongDiscordInteractionInput, SendDiscordInteractionMessageInput, SendDiscordMessageInput } from "../src/discord.js";
 import { DiscordBridgeRouter, parseDiscordMessageCommand, parseDiscordSlashCommand } from "../src/discord-router.js";
-import { type OpenCodeHealth, type OpenCodeSession } from "../src/opencode.js";
+import { type OpenCodeHealth, type OpenCodePermissionResponse, type OpenCodeSession } from "../src/opencode.js";
 import { createDefaultBridgeState, readBridgeState, writeBridgeState } from "../src/state.js";
 
 const tempDirs: string[] = [];
@@ -35,6 +35,12 @@ describe("Discord command parsing", () => {
         const parsed = parseDiscordSlashCommand(interaction("user-id", "control-channel", "prompt", "text", "hello"), "oc");
 
         assert.deepEqual(parsed, { name: "prompt", args: ["hello"], text: "hello" });
+    });
+
+    it("parses slash permission decisions", () => {
+        const parsed = parseDiscordSlashCommand(interaction("user-id", "control-channel", "deny", "permission_id", "per_123", "message", "too risky"), "oc");
+
+        assert.deepEqual(parsed, { name: "deny", args: ["per_123", "too risky"], text: "per_123 too risky" });
     });
 });
 
@@ -98,6 +104,39 @@ describe("DiscordBridgeRouter", () => {
         assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] prompt sent to ses_abc"]);
     });
 
+    it("routes permission decisions to OpenCode", async () => {
+        const fixture = await createFixture();
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "discord:control-channel", platform: "discord", surface: { channelID: "control-channel", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "!oc allow per_once"));
+        await router.handleMessage(message("user-id", "control-channel", "!oc always per_always"));
+        await router.handleMessage(message("user-id", "control-channel", "!oc deny per_reject too risky"));
+
+        assert.deepEqual(fixture.opencode.permissionReplies, [
+            { sessionID: "ses_abc", permissionID: "per_once", response: "once" },
+            { sessionID: "ses_abc", permissionID: "per_always", response: "always" },
+            { sessionID: "ses_abc", permissionID: "per_reject", response: "reject", message: "too risky" },
+        ]);
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), [
+            "[bridge] permission once sent for per_once",
+            "[bridge] permission always sent for per_always",
+            "[bridge] permission reject sent for per_reject",
+        ]);
+    });
+
+    it("rejects permission commands without a permission ID", async () => {
+        const fixture = await createFixture();
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "!oc allow"));
+
+        assert.deepEqual(fixture.opencode.permissionReplies, []);
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] permission ID is required"]);
+    });
+
     it("acks allowed slash interactions before posting output to the channel", async () => {
         const fixture = await createFixture({ sessions: [{ id: "ses_abc", title: "Example", directory: null, time: null }] });
         const router = new DiscordBridgeRouter(fixture.dependencies);
@@ -137,12 +176,14 @@ interface FakeOpenCode {
     healthCalls: number;
     createdTitles: string[];
     prompts: Array<{ sessionID: string; text: string }>;
+    permissionReplies: Array<{ sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }>;
     health(): Promise<OpenCodeHealth>;
     listSessions(options?: { limit?: number }): Promise<OpenCodeSession[]>;
     getSession(input: { sessionID: string }): Promise<OpenCodeSession>;
     createSession(input?: { title?: string }): Promise<OpenCodeSession>;
     sendPrompt(input: { sessionID: string; text: string }): Promise<void>;
     abortSession(input: { sessionID: string }): Promise<void>;
+    replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void>;
 }
 
 async function createFixture(options: FixtureOptions = {}): Promise<{
@@ -181,6 +222,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         healthCalls: 0,
         createdTitles: [],
         prompts: [],
+        permissionReplies: [],
         async health(): Promise<OpenCodeHealth> {
             opencode.healthCalls += 1;
             return { healthy: true, version: "1.3.17" };
@@ -200,6 +242,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         },
         async abortSession(): Promise<void> {
             return undefined;
+        },
+        async replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void> {
+            opencode.permissionReplies.push(input);
         },
     };
 
@@ -272,7 +317,14 @@ function interaction(
     subcommand: string,
     optionName?: string,
     optionValue?: string,
+    secondOptionName?: string,
+    secondOptionValue?: string,
 ): DiscordInteraction {
+    const options = optionName ? [{ name: optionName, type: 3, value: optionValue ?? "" }] : [];
+    if (secondOptionName) {
+        options.push({ name: secondOptionName, type: 3, value: secondOptionValue ?? "" });
+    }
+
     return {
         id: "interaction-id",
         token: "interaction-token",
@@ -287,7 +339,7 @@ function interaction(
                 {
                     name: subcommand,
                     type: 1,
-                    options: optionName ? [{ name: optionName, type: 3, value: optionValue ?? "" }] : [],
+                    options,
                 },
             ],
         },

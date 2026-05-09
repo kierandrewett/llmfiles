@@ -59,6 +59,28 @@ describe("DiscordEventRelay", () => {
 
         assert.deepEqual(fixture.discord.messages, [{ channelID: "channel-id", content: "hello" }]);
     });
+
+    it("relays permission requests to Discord bindings", async () => {
+        const fixture = await createFixture();
+        const relay = new DiscordEventRelay({ statePath: fixture.statePath, discord: fixture.discord });
+
+        await relay.handleEvent(permissionEvent("ses_abc"));
+
+        assert.deepEqual(fixture.discord.messages, [
+            {
+                channelID: "channel-id",
+                content: [
+                    "[bridge] permission requested",
+                    "[bridge] id: per_123",
+                    "[bridge] session: ses_abc",
+                    "[bridge] request: Run bash command",
+                    "[bridge] permission: bash",
+                    "[bridge] pattern: git status",
+                    "[bridge] reply: !oc allow per_123, !oc always per_123, or !oc deny per_123",
+                ].join("\n"),
+            },
+        ]);
+    });
 });
 
 async function createFixture(): Promise<{
@@ -114,6 +136,21 @@ function partUpdated(sessionID: string, partID: string, text: string, delta: str
                 sessionID,
                 text,
             },
+        },
+    };
+}
+
+function permissionEvent(sessionID: string): OpenCodeEvent {
+    return {
+        type: "permission.updated",
+        properties: {
+            id: "per_123",
+            sessionID,
+            type: "bash",
+            pattern: "git status",
+            title: "Run bash command",
+            metadata: {},
+            time: { created: 1 },
         },
     };
 }
