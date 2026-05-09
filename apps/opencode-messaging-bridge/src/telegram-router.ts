@@ -8,7 +8,20 @@ import {
     loadOrCreateBridgeState,
     writeBridgeState,
 } from "./state.js";
-import { chunkTelegramText, type SendChatActionInput, type SendMessageInput, type TelegramMessage, type TelegramUpdate } from "./telegram.js";
+import {
+    TELEGRAM_MARKDOWN_PARSE_MODE,
+    chunkTelegramText,
+    escapeTelegramMarkdown,
+    type SendChatActionInput,
+    type SendMessageInput,
+    type SetMessageReactionInput,
+    type TelegramMessage,
+    type TelegramUpdate,
+} from "./telegram.js";
+
+const TELEGRAM_REACTION_DONE = "\u{1F44D}";
+const TELEGRAM_REACTION_UNKNOWN = "\u{1F914}";
+const TELEGRAM_DIRECT_COMMANDS = new Set(["status", "sessions", "attach", "new", "prompt", "reply", "abort"]);
 
 export interface TelegramRouterOpenCodeClient {
     health(): Promise<OpenCodeHealth>;
@@ -22,6 +35,7 @@ export interface TelegramRouterOpenCodeClient {
 export interface TelegramRouterTelegramClient {
     sendMessage(input: SendMessageInput): Promise<void>;
     sendChatAction(input: SendChatActionInput): Promise<void>;
+    setMessageReaction(input: SetMessageReactionInput): Promise<void>;
 }
 
 export interface TelegramBridgeRouterDependencies {
@@ -62,35 +76,43 @@ export class TelegramBridgeRouter {
             }
 
             await this.handlePrompt(message, message.text);
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
 
         if (command.name === "status") {
             await this.handleStatus(message);
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
         if (command.name === "sessions") {
             await this.handleSessions(message);
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
         if (command.name === "attach") {
             await this.handleAttach(message, command.args[0]);
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
         if (command.name === "new") {
             await this.handleNew(message, command.args.join(" ").trim());
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
         if (command.name === "prompt" || command.name === "reply") {
             await this.handlePrompt(message, command.args.join(" ").trim());
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
         if (command.name === "abort") {
             await this.handleAbort(message);
+            await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
 
-        await this.send(message, "[bridge] unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, or /oc prompt.");
+        await this.send(message, bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, or /oc prompt."));
+        await this.react(message, TELEGRAM_REACTION_UNKNOWN);
     }
 
     private async handleStatus(message: TelegramMessage): Promise<void> {
@@ -100,9 +122,9 @@ export class TelegramBridgeRouter {
         await this.send(
             message,
             [
-                `[bridge] OpenCode healthy: ${String(health.healthy)}`,
-                `[bridge] OpenCode version: ${health.version}`,
-                `[bridge] active session: ${activeSessionID ?? "none"}`,
+                bridgeField("OpenCode healthy", String(health.healthy)),
+                bridgeField("OpenCode version", health.version),
+                bridgeField("active session", activeSessionID ?? "none"),
             ].join("\n"),
         );
     }
@@ -110,7 +132,7 @@ export class TelegramBridgeRouter {
     private async handleSessions(message: TelegramMessage): Promise<void> {
         const sessions = await this.opencode.listSessions({ limit: 10 });
         if (sessions.length === 0) {
-            await this.send(message, "[bridge] no sessions found");
+            await this.send(message, bridgePlain("no sessions found"));
             return;
         }
 
@@ -119,55 +141,55 @@ export class TelegramBridgeRouter {
 
     private async handleAttach(message: TelegramMessage, target: string | undefined): Promise<void> {
         if (!target) {
-            await this.send(message, "[bridge] attach needs a session ID or latest");
+            await this.send(message, bridgePlain("attach needs a session ID or latest"));
             return;
         }
 
         const session = target === "latest" ? await this.latestSession() : await this.opencode.getSession({ sessionID: target });
         if (!session) {
-            await this.send(message, "[bridge] no sessions found");
+            await this.send(message, bridgePlain("no sessions found"));
             return;
         }
 
         await this.bind(message, session);
-        await this.send(message, `[bridge] attached ${formatSessionLine(session)}`);
+        await this.send(message, bridgeLine(`attached ${formatSessionLine(session)}`));
     }
 
     private async handleNew(message: TelegramMessage, title: string): Promise<void> {
         const session = await this.opencode.createSession(title ? { title } : {});
 
         await this.bind(message, session);
-        await this.send(message, `[bridge] created and attached ${formatSessionLine(session)}`);
+        await this.send(message, bridgeLine(`created and attached ${formatSessionLine(session)}`));
     }
 
     private async handlePrompt(message: TelegramMessage, text: string): Promise<void> {
         if (text.length === 0) {
-            await this.send(message, "[bridge] prompt text is required");
+            await this.send(message, bridgePlain("prompt text is required"));
             return;
         }
 
         const state = await this.loadState();
         const surface = findSurface(state, surfaceID(message));
         if (!surface?.activeSessionID) {
-            await this.send(message, "[bridge] no active session. Use /oc attach latest or /oc new first.");
+            await this.send(message, bridgePlain("no active session. Use /oc attach latest or /oc new first."));
             return;
         }
 
         await this.telegram.sendChatAction({ chatID: message.chatID, threadID: message.threadID, action: "typing" });
         await this.opencode.sendPrompt({ sessionID: surface.activeSessionID, text });
-        await this.send(message, `[bridge] prompt sent to ${surface.activeSessionID}`);
+        await this.send(message, bridgeLine(`prompt sent to ${markdownCode(surface.activeSessionID)}`));
     }
 
     private async handleAbort(message: TelegramMessage): Promise<void> {
         const state = await this.loadState();
         const surface = findSurface(state, surfaceID(message));
         if (!surface?.activeSessionID) {
-            await this.send(message, "[bridge] no active session. Use /oc attach latest or /oc new first.");
+            await this.send(message, bridgePlain("no active session. Use /oc attach latest or /oc new first."));
             return;
         }
 
         await this.opencode.abortSession({ sessionID: surface.activeSessionID });
-        await this.send(message, `[bridge] abort requested for ${surface.activeSessionID}`);
+        await this.send(message, bridgeLine(`abort requested for ${markdownCode(surface.activeSessionID)}`));
     }
 
     private async latestSession(): Promise<OpenCodeSession | null> {
@@ -205,7 +227,20 @@ export class TelegramBridgeRouter {
 
     private async send(message: TelegramMessage, text: string): Promise<void> {
         for (const chunk of chunkTelegramText(text)) {
-            await this.telegram.sendMessage({ chatID: message.chatID, threadID: message.threadID, text: chunk });
+            await this.telegram.sendMessage({
+                chatID: message.chatID,
+                threadID: message.threadID,
+                text: chunk,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+        }
+    }
+
+    private async react(message: TelegramMessage, emoji: string): Promise<void> {
+        try {
+            await this.telegram.setMessageReaction({ chatID: message.chatID, messageID: message.messageID, emoji });
+        } catch {
+            return;
         }
     }
 
@@ -227,15 +262,30 @@ export class TelegramBridgeRouter {
 
 function parseCommand(text: string): ParsedCommand | null {
     const parts = text.trim().split(/\s+/).filter((part) => part.length > 0);
-    const root = parts[0];
-    if (!root || !/^\/oc(?:@\w+)?$/i.test(root)) {
+    const root = parts[0] ? stripBotUsername(parts[0]) : null;
+    if (root === "/oc") {
+        return {
+            name: parts[1]?.toLowerCase() ?? "status",
+            args: parts.slice(2),
+        };
+    }
+    if (!root?.startsWith("/")) {
+        return null;
+    }
+
+    const directCommand = root.slice(1).toLowerCase();
+    if (!TELEGRAM_DIRECT_COMMANDS.has(directCommand)) {
         return null;
     }
 
     return {
-        name: parts[1]?.toLowerCase() ?? "status",
-        args: parts.slice(2),
+        name: directCommand,
+        args: parts.slice(1),
     };
+}
+
+function stripBotUsername(command: string): string {
+    return command.replace(/@\w+$/i, "").toLowerCase();
 }
 
 function surfaceID(message: TelegramMessage): string {
@@ -274,5 +324,25 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
 }
 
 function formatSessionLine(session: OpenCodeSession): string {
-    return `${session.id}\t${session.title ?? "(untitled)"}`;
+    return `${markdownCode(session.id)} ${escapeTelegramMarkdown(session.title ?? "(untitled)")}`;
+}
+
+function bridgePlain(text: string): string {
+    return bridgeLine(escapeTelegramMarkdown(text));
+}
+
+function bridgeField(label: string, value: string): string {
+    return bridgeLine(`${escapeTelegramMarkdown(label)}: ${markdownCode(value)}`);
+}
+
+function bridgeLine(text: string): string {
+    return `${markdownBold("[bridge]")} ${text}`;
+}
+
+function markdownBold(text: string): string {
+    return `*${escapeTelegramMarkdown(text)}*`;
+}
+
+function markdownCode(text: string): string {
+    return `\`${text.replace(/[\\`]/g, (character) => `\\${character}`)}\``;
 }

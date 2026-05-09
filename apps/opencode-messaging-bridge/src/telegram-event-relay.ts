@@ -1,6 +1,6 @@
 import type { OpenCodeEvent } from "./opencode.js";
 import { type BridgeBindingState, loadOrCreateBridgeState } from "./state.js";
-import { chunkTelegramText, type SendMessageInput } from "./telegram.js";
+import { TELEGRAM_MARKDOWN_PARSE_MODE, chunkTelegramText, escapeTelegramMarkdown, type SendMessageInput } from "./telegram.js";
 
 const DEFAULT_FLUSH_DELAY_MS = 1200;
 
@@ -165,7 +165,8 @@ export class TelegramEventRelay {
             await this.telegram.sendMessage({
                 chatID: binding.surface.chatID,
                 threadID: binding.surface.threadID,
-                text: chunk,
+                text: escapeTelegramMarkdown(chunk),
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
             });
         }
     }

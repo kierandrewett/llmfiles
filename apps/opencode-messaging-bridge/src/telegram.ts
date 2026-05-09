@@ -1,5 +1,16 @@
 const TELEGRAM_API_BASE_URL = "https://api.telegram.org";
 const TELEGRAM_MESSAGE_LIMIT = 4096;
+export const TELEGRAM_MARKDOWN_PARSE_MODE = "MarkdownV2";
+export const TELEGRAM_BRIDGE_BOT_COMMANDS: TelegramBotCommand[] = [
+    { command: "oc", description: "Show OpenCode bridge status or run /oc <command>" },
+    { command: "status", description: "Show OpenCode bridge status" },
+    { command: "sessions", description: "List recent OpenCode sessions" },
+    { command: "attach", description: "Attach this chat to an OpenCode session" },
+    { command: "new", description: "Create and attach a new OpenCode session" },
+    { command: "prompt", description: "Send a prompt to the active OpenCode session" },
+    { command: "reply", description: "Reply to the active OpenCode session" },
+    { command: "abort", description: "Abort the active OpenCode session" },
+];
 
 export interface TelegramUpdate {
     updateID: number;
@@ -24,12 +35,29 @@ export interface SendMessageInput {
     chatID: string;
     threadID: string | null;
     text: string;
+    parseMode?: typeof TELEGRAM_MARKDOWN_PARSE_MODE;
 }
 
 export interface SendChatActionInput {
     chatID: string;
     threadID: string | null;
     action: "typing";
+}
+
+export interface TelegramBotCommand {
+    command: string;
+    description: string;
+}
+
+export interface SetMyCommandsInput {
+    commands: TelegramBotCommand[];
+}
+
+export interface SetMessageReactionInput {
+    chatID: string;
+    messageID: number;
+    emoji: string;
+    isBig?: boolean;
 }
 
 export class TelegramBotApiError extends Error {
@@ -81,6 +109,14 @@ export class TelegramBotApiClient {
         await this.request("sendMessage", telegramMessageBody(input));
     }
 
+    async setMyCommands(input: SetMyCommandsInput): Promise<void> {
+        await this.request("setMyCommands", telegramCommandsBody(input));
+    }
+
+    async setMessageReaction(input: SetMessageReactionInput): Promise<void> {
+        await this.request("setMessageReaction", telegramReactionBody(input));
+    }
+
     async sendChatAction(input: SendChatActionInput): Promise<void> {
         await this.request("sendChatAction", telegramChatActionBody(input));
     }
@@ -118,6 +154,10 @@ export function chunkTelegramText(text: string, limit = TELEGRAM_MESSAGE_LIMIT):
     return chunks;
 }
 
+export function escapeTelegramMarkdown(text: string): string {
+    return text.replace(/[\\_*\[\]()~`>#+\-=|{}.!]/g, (character) => `\\${character}`);
+}
+
 export function telegramMessageBody(input: SendMessageInput): Record<string, unknown> {
     const body: Record<string, unknown> = {
         chat_id: input.chatID,
@@ -127,6 +167,27 @@ export function telegramMessageBody(input: SendMessageInput): Record<string, unk
 
     if (input.threadID !== null) {
         body.message_thread_id = Number(input.threadID);
+    }
+    if (input.parseMode) {
+        body.parse_mode = input.parseMode;
+    }
+
+    return body;
+}
+
+export function telegramCommandsBody(input: SetMyCommandsInput): Record<string, unknown> {
+    return { commands: input.commands };
+}
+
+export function telegramReactionBody(input: SetMessageReactionInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        chat_id: input.chatID,
+        message_id: input.messageID,
+        reaction: [{ type: "emoji", emoji: input.emoji }],
+    };
+
+    if (input.isBig !== undefined) {
+        body.is_big = input.isBig;
     }
 
     return body;

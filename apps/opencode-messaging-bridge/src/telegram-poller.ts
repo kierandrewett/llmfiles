@@ -1,9 +1,10 @@
 import { loadOrCreateBridgeState, readBridgeState, writeBridgeState } from "./state.js";
-import type { GetUpdatesOptions, TelegramUpdate } from "./telegram.js";
+import { TELEGRAM_BRIDGE_BOT_COMMANDS, type GetUpdatesOptions, type SetMyCommandsInput, type TelegramUpdate } from "./telegram.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
 
 export interface TelegramPollerClient {
+    setMyCommands(input: SetMyCommandsInput): Promise<void>;
     getUpdates(options?: GetUpdatesOptions): Promise<TelegramUpdate[]>;
 }
 
@@ -25,6 +26,7 @@ export class TelegramBridgePoller {
     private readonly router: TelegramPollerRouter;
     private readonly now: () => Date;
     private readonly timeoutSeconds: number;
+    private commandsRegistered = false;
 
     constructor(dependencies: TelegramBridgePollerDependencies) {
         this.statePath = dependencies.statePath;
@@ -35,6 +37,8 @@ export class TelegramBridgePoller {
     }
 
     async runOnce(): Promise<number> {
+        await this.registerCommands();
+
         const state = await loadOrCreateBridgeState(this.statePath, this.now());
         const request: GetUpdatesOptions = {
             timeoutSeconds: this.timeoutSeconds,
@@ -52,6 +56,15 @@ export class TelegramBridgePoller {
         }
 
         return updates.length;
+    }
+
+    private async registerCommands(): Promise<void> {
+        if (this.commandsRegistered) {
+            return;
+        }
+
+        await this.telegram.setMyCommands({ commands: TELEGRAM_BRIDGE_BOT_COMMANDS });
+        this.commandsRegistered = true;
     }
 
     private async advanceOffset(offset: number): Promise<void> {
