@@ -308,6 +308,8 @@ yarn start telegram-once
 yarn start telegram
 yarn start discord-once
 yarn start discord
+yarn start telegram+discord-once
+yarn start telegram+discord
 yarn check
 ```
 
@@ -318,6 +320,10 @@ can be sent back to Telegram.
 `discord-once` connects to the Discord Gateway once and exits when the socket closes. Use it for debugging Gateway and
 slash-command setup. `discord` reconnects continuously and also subscribes to OpenCode server-sent events so bound session
 output can be sent back to Discord.
+
+`telegram+discord-once` runs one Telegram poll and one Discord Gateway cycle. `telegram+discord` runs both surfaces in one
+bridge process with one managed `opencode serve` process and one OpenCode event relay for both Telegram and Discord
+bindings. Keep both token blocks in the runtime env file when you use the combined command.
 
 The state file defaults to:
 
@@ -366,17 +372,19 @@ cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
 $EDITOR "$HOME/.config/opencode-messaging-bridge/env"
 ```
 
-Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run. Use Discord for the standalone
-Discord bridge:
+Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run:
 
 ```bash
+OPENCODE_BRIDGE_COMMAND=telegram
+# or
 OPENCODE_BRIDGE_COMMAND=discord
 # or
-OPENCODE_BRIDGE_COMMAND=telegram
+OPENCODE_BRIDGE_COMMAND=telegram+discord
 ```
 
-In the runtime env file, remove the token block for the surface you are not running. The example shows both blocks so the
-available keys are visible, not because both are required.
+In the runtime env file, remove the token block for any surface you are not running. Keep both token blocks when
+`OPENCODE_BRIDGE_COMMAND=telegram+discord`. The example shows both blocks so the available keys are visible, not because
+both are always required.
 
 Check the Compose shape with the example env before using real tokens:
 
