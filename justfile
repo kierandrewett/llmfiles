@@ -11,7 +11,12 @@ opencode-bridge *args:
 
 # Typecheck and test the standalone OpenCode messaging bridge app.
 opencode-bridge-check:
-    @yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" check
+	@yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" check
+
+# Typecheck and smoke-test OpenCode plugins.
+opencode-plugin-check:
+	@yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" exec tsc --noEmit -p "{{repo}}/tests/opencode/tsconfig.json"
+	@yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" exec tsx "{{repo}}/tests/opencode/discord-remote-control-smoke.ts"
 
 # Link a source path to a destination. Existing real files are skipped.
 _link src dst:
