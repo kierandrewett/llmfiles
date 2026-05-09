@@ -7,11 +7,12 @@ This package implements the standalone bridge described in `../../docs/opencode-
 - environment config parsing
 - atomic JSON state storage
 - OpenCode HTTP client for health checks, session listing, session creation, prompt sends, and aborts
-- Telegram Bot API long polling, command-menu registration, reactions, and MarkdownV2 text responses
+- Telegram Bot API long polling, command-menu registration, reactions, MarkdownV2 text responses, and streaming previews
 - Discord Gateway, REST, slash-command, and prefix-command handling
 - allowlisted Telegram command routing for `/oc ...` subcommands and first-class menu commands such as `/status`,
   `/sessions`, `/attach`, `/new`, `/prompt`, `/reply`, and `/abort`
-- OpenCode server-sent event relay for bound Telegram and Discord sessions, currently for assistant text parts
+- OpenCode server-sent event relay for bound Telegram and Discord sessions, including Telegram draft/edit previews for
+  assistant text parts
 - optional OpenCode process supervision for `opencode serve`
 - CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
@@ -151,6 +152,11 @@ On the first poll, the bridge calls Telegram `setMyCommands` so the bot menu exp
 one command namespace. Bridge-generated responses use Telegram MarkdownV2 and successful commands get a best-effort
 reaction. Reaction failures from Telegram are ignored so command handling still completes.
 
+For assistant output, the bridge uses Telegram's newer AI-agent path where it can. Private chats receive ephemeral
+`sendMessageDraft` updates while OpenCode is still generating, followed by a final persisted `sendMessage` when the session
+goes idle. Groups and supergroups use a normal bot message as a preview, then update that message with `editMessageText` as
+more text arrives. In both paths the final text is MarkdownV2-escaped before sending.
+
 ### Telegram smoke test
 
 Send these messages to the allowlisted Telegram chat:
@@ -169,7 +175,8 @@ Expected result:
 - `/status` works from Telegram's command menu and returns the same status response.
 - `/oc new` creates and binds a session to that Telegram chat.
 - `/oc prompt` sends text to the bound OpenCode session.
-- Assistant text is relayed back into Telegram from the OpenCode event stream using MarkdownV2-safe escaping.
+- Assistant text is relayed back into Telegram from the OpenCode event stream using MarkdownV2-safe escaping. Private chats
+  should show draft-style streaming while generation is in progress; groups should see a bot message update in place.
 
 ## Discord setup
 
