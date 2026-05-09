@@ -79,6 +79,35 @@ describe("OpenCodeHttpClient", () => {
         assert.equal(requests[0]?.init.method, "POST");
     });
 
+    it("replies to permission requests through the current permission endpoint", async () => {
+        const { client, requests } = createClient([true]);
+
+        await client.replyPermission({ permissionID: "per_abc", response: "once", message: "looks safe" });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/permission/per_abc/reply");
+        assert.equal(requests[0]?.init.method, "POST");
+        assert.equal(requests[0]?.init.body, JSON.stringify({ reply: "once", message: "looks safe" }));
+    });
+
+    it("falls back to the documented session permission endpoint when needed", async () => {
+        const { client, requests } = createSequencedClient([
+            { status: 404, body: { error: "missing route" } },
+            { status: 200, body: true },
+        ]);
+
+        await client.replyPermission({
+            sessionID: "ses_abc",
+            permissionID: "per_abc",
+            response: "always",
+            directory: "/tmp/project",
+        });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/permission/per_abc/reply?directory=%2Ftmp%2Fproject");
+        assert.equal(requests[0]?.init.body, JSON.stringify({ reply: "always" }));
+        assert.equal(requests[1]?.url, "http://127.0.0.1:4096/session/ses_abc/permissions/per_abc?directory=%2Ftmp%2Fproject");
+        assert.equal(requests[1]?.init.body, JSON.stringify({ response: "always" }));
+    });
+
     it("throws structured errors for failed requests", async () => {
         const { client } = createClient([{ error: "nope" }], 500);
 
@@ -146,6 +175,27 @@ function createClient(responses: unknown[], status = 200): { client: OpenCodeHtt
         const body = responses.shift();
         return new Response(JSON.stringify(body), {
             status,
+            headers: { "content-type": "application/json" },
+        });
+    };
+
+    return {
+        client: new OpenCodeHttpClient({ baseUrl: "http://127.0.0.1:4096", fetch: fetcher }),
+        requests,
+    };
+}
+
+function createSequencedClient(responses: Array<{ status: number; body: unknown }>): { client: OpenCodeHttpClient; requests: CapturedRequest[] } {
+    const requests: CapturedRequest[] = [];
+    const fetcher: typeof fetch = async (input, init = {}) => {
+        requests.push({ url: String(input), init });
+        const response = responses.shift();
+        if (!response) {
+            throw new Error("No fake OpenCode response configured");
+        }
+
+        return new Response(JSON.stringify(response.body), {
+            status: response.status,
             headers: { "content-type": "application/json" },
         });
     };
