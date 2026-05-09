@@ -7,6 +7,8 @@ import { afterEach, describe, it } from "node:test";
 import { runCli } from "../src/cli.js";
 import type { OpenCodeHealth, OpenCodeSession } from "../src/opencode.js";
 
+const TELEGRAM_DISABLED_ERROR = "[bridge] Telegram bridge is not enabled. "
+    + "Set OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN and OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS.";
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -28,7 +30,9 @@ describe("runCli", () => {
     });
 
     it("prints recent sessions", async () => {
-        const { env, output, client } = await createFixture({ sessions: [{ id: "ses_abc", title: "Example", directory: null, time: null }] });
+        const { env, output, client } = await createFixture({
+            sessions: [{ id: "ses_abc", title: "Example", directory: null, time: null }],
+        });
 
         const exitCode = await runCli(["sessions"], { env, stdout: output.stdout, stderr: output.stderr, client });
 
@@ -37,12 +41,43 @@ describe("runCli", () => {
     });
 
     it("creates a session", async () => {
-        const { env, output, client } = await createFixture({ createdSession: { id: "ses_new", title: "New session", directory: null, time: null } });
+        const { env, output, client } = await createFixture({
+            createdSession: { id: "ses_new", title: "New session", directory: null, time: null },
+        });
 
         const exitCode = await runCli(["new", "New", "session"], { env, stdout: output.stdout, stderr: output.stderr, client });
 
         assert.equal(exitCode, 0);
         assert.deepEqual(output.lines, ["[bridge] created session ses_new\tNew session"]);
+    });
+
+    it("runs one Telegram polling cycle when Telegram is configured", async () => {
+        const { env, output, telegramPoller } = await createFixture({ telegramProcessed: 2 });
+
+        env.OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN = "telegram-token";
+        env.OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS = "123";
+
+        const exitCode = await runCli(
+            ["telegram-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, telegramPoller },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.equal(telegramPoller.calls, 1);
+        assert.deepEqual(output.lines, ["[bridge] telegram processed 2 update(s)"]);
+    });
+
+    it("refuses Telegram polling when Telegram is not configured", async () => {
+        const { env, output, telegramPoller } = await createFixture();
+
+        const exitCode = await runCli(
+            ["telegram-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, telegramPoller },
+        );
+
+        assert.equal(exitCode, 1);
+        assert.equal(telegramPoller.calls, 0);
+        assert.deepEqual(output.errors, [TELEGRAM_DISABLED_ERROR]);
     });
 });
 
@@ -50,6 +85,7 @@ interface FixtureOptions {
     health?: OpenCodeHealth;
     sessions?: OpenCodeSession[];
     createdSession?: OpenCodeSession;
+    telegramProcessed?: number;
 }
 
 interface FixtureClient {
@@ -60,8 +96,14 @@ interface FixtureClient {
 
 async function createFixture(options: FixtureOptions = {}): Promise<{
     env: Record<string, string>;
-    output: { lines: string[]; errors: string[]; stdout(line: string): void; stderr(line: string): void };
+    output: {
+        lines: string[];
+        errors: string[];
+        stdout(line: string): void;
+        stderr(line: string): void;
+    };
     client: FixtureClient;
+    telegramPoller: { calls: number; runOnce(): Promise<number> };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bridge-cli-test-"));
     tempDirs.push(dir);
@@ -91,6 +133,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             },
             async createSession(): Promise<OpenCodeSession> {
                 return options.createdSession ?? { id: "ses_new", title: null, directory: null, time: null };
+            },
+        },
+        telegramPoller: {
+            calls: 0,
+            async runOnce(): Promise<number> {
+                this.calls += 1;
+                return options.telegramProcessed ?? 0;
             },
         },
     };

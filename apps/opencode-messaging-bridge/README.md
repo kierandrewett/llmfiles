@@ -2,14 +2,18 @@
 
 Standalone daemon for routing Telegram and Discord messages into OpenCode sessions.
 
-This package is Phase 1 of the bridge plan in `../../docs/opencode-messaging-bridge.md`. It currently provides the foundation pieces only:
+This package implements the Phase 1 foundation and the first Telegram inbound slice from
+`../../docs/opencode-messaging-bridge.md`:
 
 - environment config parsing
 - atomic JSON state storage
-- OpenCode HTTP client for health checks, session listing, and session creation
-- CLI commands for checking the configured OpenCode server
+- OpenCode HTTP client for health checks, session listing, session creation, prompt sends, and aborts
+- Telegram Bot API long polling and text responses
+- allowlisted Telegram command routing for `/oc status`, `/oc sessions`, `/oc attach`, `/oc new`, `/oc prompt`, and
+  `/oc abort`
+- CLI commands for checking the configured OpenCode server and running Telegram polling
 
-It does not start Telegram or Discord adapters yet.
+It does not start Discord or relay OpenCode assistant events back to Telegram yet.
 
 ## Setup
 
@@ -31,14 +35,28 @@ Set the bridge target:
 export OPENCODE_BRIDGE_OPENCODE_BASE_URL="http://127.0.0.1:4096"
 ```
 
+For Telegram polling, also set the bot token and allowlist. Keep these values in an untracked shell file or local
+environment, not in git:
+
+```bash
+export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="..."
+export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS="12345"
+export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS="12345" # optional, but recommended
+```
+
 ## Commands
 
 ```bash
 yarn start status
 yarn start sessions
 yarn start new "Session title"
+yarn start telegram-once
+yarn start telegram
 yarn check
 ```
+
+`telegram-once` processes one `getUpdates` response and exits. Use it for smoke tests and service debugging. `telegram`
+runs the same poller continuously and keeps the last committed Telegram `updateOffset` in the state file.
 
 The state file defaults to:
 

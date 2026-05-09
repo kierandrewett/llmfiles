@@ -1,6 +1,6 @@
 # OpenCode messaging bridge plan
 
-Status: draft design with Phase 1 foundation implemented, May 2026.
+Status: draft design with Phase 1 implemented and the first Telegram inbound slice working, May 2026.
 
 This document defines a standalone, always-on messaging bridge for OpenCode. It is the next step after the Discord remote-control plugin prototype. The plugin proved the UX and the platform edge cases, but it also showed the wrong lifecycle: a plugin attached to an OpenCode worker can exit before slow Discord retries, thread recovery, or cross-platform routing has finished.
 
@@ -368,6 +368,10 @@ Verification:
 
 ### Phase 2: Telegram inbound and outbound MVP
 
+Current status: Telegram long polling, allowlist checks, command responses, session binding, session creation, prompt
+sends, and abort commands are implemented in `apps/opencode-messaging-bridge/`. The remaining Phase 2 gap is relaying
+OpenCode assistant output for bound sessions back to Telegram.
+
 Acceptance criteria:
 
 - Telegram long polling persists `updateOffset`.
@@ -431,12 +435,13 @@ Verification:
 
 ## Next steps
 
-Phase 1 now lives in `llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to extend that package with the Telegram adapter:
+Phase 1 and the Telegram inbound command slice now live in `llmfiles/apps/opencode-messaging-bridge/`. The next
+implementation step is to complete Telegram output fidelity:
 
-- add Telegram Bot API long polling
-- persist `updateOffset` after each processed update
-- enforce Telegram user and chat allowlists
-- implement `/oc status`, `/oc sessions`, `/oc attach`, `/oc new`, and `/oc prompt`
-- relay bound session output back through `sendMessage`
+- subscribe to OpenCode server-sent events
+- relay bound session assistant output back through `sendMessage`
+- coalesce noisy `message.part.updated` bursts before posting to Telegram
+- keep permission request commands deferred to Phase 3 unless the OpenCode event slice exposes a clean endpoint during
+  implementation
 
 The dedicated-repo option can stay deferred until the daemon has Telegram and Discord parity. Keeping the first implementation in `llmfiles` is still the smallest reversible step.
