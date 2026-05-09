@@ -3062,7 +3062,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }: Plugin
 
         "tool.execute.before": async (input: ToolExecuteHookInput) => {
             const sessionID = stringValue(input.sessionID);
-            if (!shouldRelaySession(sessionID)) return;
+            if (!sessionID || !shouldRelaySession(sessionID)) return;
             const callID = stringValue(input.callID) || "unknown";
             const key = `${sessionID}:${callID}:before`;
             if (seenToolStates.has(key)) return;
@@ -3071,7 +3071,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }: Plugin
 
         "tool.execute.after": async (input: ToolExecuteHookInput, output: unknown) => {
             const sessionID = stringValue(input.sessionID);
-            if (!shouldRelaySession(sessionID)) return;
+            if (!sessionID || !shouldRelaySession(sessionID)) return;
             const callID = stringValue(input.callID) || "unknown";
             const tool = stringValue(input.tool) || "tool";
             const key = `${sessionID}:${callID}:after`;
