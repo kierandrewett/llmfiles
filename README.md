@@ -8,6 +8,8 @@ This repo is the source of truth. Tool-specific installs are opt-in symlinks, no
 
 - `profiles/opencode/` contains the base OpenCode profile.
 - `plugins/opencode/` contains OpenCode-only plugins.
+- `apps/opencode-messaging-bridge/` contains the standalone OpenCode messaging bridge daemon.
+- `docs/` contains design notes for standalone LLM tooling that is not an OpenCode plugin.
 - `skills/collections/` contains vendored skill collections.
 - `skills/local/` contains local standalone skills.
 - `justfile` links the pieces into whichever config folder you choose.
@@ -22,6 +24,9 @@ just install-opencode-all                     # core + plugins + skill collectio
 
 just install-agents-skills                    # ~/.agents/skills
 just install-claude-skills                    # ~/.claude/skills
+
+just opencode-bridge status                   # check the standalone OpenCode bridge
+just opencode-bridge-check                    # typecheck and test the bridge app
 
 just install-opencode /tmp/opencode           # custom target
 just install-local-skill ntfy /tmp/skills     # one local skill to any target

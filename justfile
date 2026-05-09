@@ -5,6 +5,14 @@ repo := justfile_directory()
 default:
     @just --list
 
+# Run the standalone OpenCode messaging bridge app.
+opencode-bridge *args:
+    @yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" start {{args}}
+
+# Typecheck and test the standalone OpenCode messaging bridge app.
+opencode-bridge-check:
+    @yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" check
+
 # Link a source path to a destination. Existing real files are skipped.
 _link src dst:
     @src="{{src}}"; dst="{{dst}}"; \
