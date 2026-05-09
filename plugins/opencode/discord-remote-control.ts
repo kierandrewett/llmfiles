@@ -2110,55 +2110,71 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }: Plugin
         if (forumIntakes.has(thread.threadID) || threadSessions.has(thread.threadID)) return;
         forumIntakes.add(thread.threadID);
 
-        const postBody = (message.content || "").trim();
-        if (!postBody) {
-            forumIntakes.delete(thread.threadID);
+        try {
+            const postBody = (message.content || "").trim();
+            if (!postBody) {
+                forumIntakes.delete(thread.threadID);
+                await enqueueDiscordMessage(
+                    embedMessage(makeEmbed({ title: `${ICON.warning} Empty forum post`, description: "Add a prompt in the first post body.", color: EMBED_COLOR.warning })),
+                    { channelID: thread.threadID },
+                );
+                return;
+            }
+
             await enqueueDiscordMessage(
-                embedMessage(makeEmbed({ title: `${ICON.warning} Empty forum post`, description: "Add a prompt in the first post body.", color: EMBED_COLOR.warning })),
+                textMessage(transcriptLine("creating opencode session", "reading post and resolving folder/model metadata")),
                 { channelID: thread.threadID },
             );
-            return;
-        }
 
-        await enqueueDiscordMessage(
-            textMessage(transcriptLine("creating opencode session", "reading post and resolving folder/model metadata")),
-            { channelID: thread.threadID },
-        );
+            const plan = await classifyForumPost(thread.name || "Discord forum session", postBody);
+            const targetDirectory = plan.directory || directory;
+            const sessionID = await createSession(plan.title, targetDirectory);
+            if (!sessionID) {
+                forumIntakes.delete(thread.threadID);
+                await enqueueDiscordMessage(
+                    embedMessage(makeEmbed({ title: `${ICON.error} Failed to create OpenCode session`, color: EMBED_COLOR.error })),
+                    { channelID: thread.threadID },
+                );
+                return;
+            }
 
-        const plan = await classifyForumPost(thread.name || "Discord forum session", postBody);
-        const targetDirectory = plan.directory || directory;
-        const sessionID = await createSession(plan.title, targetDirectory);
-        if (!sessionID) {
+            const branch = await refreshBranch(targetDirectory);
+            rememberSessionMetadata(sessionID, {
+                title: plan.title,
+                directory: targetDirectory,
+                branch,
+                model: plan.model,
+            });
+            activeSessionID = sessionID;
+            activeSessionLocked = true;
+            await bindSessionThread(sessionID, thread.threadID, thread.name);
+            await markRuntimeState();
+            await announceSessionMetadata(sessionID, "Session created", thread.threadID);
+
+            const promptBody: JsonObject = {
+                parts: [{ type: "text", text: plan.prompt }],
+            };
+            if (config.agent) promptBody.agent = config.agent;
+            if (plan.model) {
+                promptBody.model = { providerID: plan.model.providerID, modelID: plan.model.modelID };
+                if (plan.model.variant) promptBody.variant = plan.model.variant;
+            }
+
+            await callSessionPrompt("promptAsync", sessionID, targetDirectory, promptBody);
+        } catch (error) {
+            if (!threadSessions.has(thread.threadID)) forumIntakes.delete(thread.threadID);
+            await log("error", "Failed to create OpenCode session from Discord forum post", { threadID: thread.threadID, error: String(error) });
             await enqueueDiscordMessage(
-                embedMessage(makeEmbed({ title: `${ICON.error} Failed to create OpenCode session`, color: EMBED_COLOR.error })),
+                embedMessage(
+                    makeEmbed({
+                        title: `${ICON.error} Forum post intake failed`,
+                        description: String(error),
+                        color: EMBED_COLOR.error,
+                    }),
+                ),
                 { channelID: thread.threadID },
             );
-            return;
         }
-
-        const branch = await refreshBranch(targetDirectory);
-        rememberSessionMetadata(sessionID, {
-            title: plan.title,
-            directory: targetDirectory,
-            branch,
-            model: plan.model,
-        });
-        activeSessionID = sessionID;
-        activeSessionLocked = true;
-        await bindSessionThread(sessionID, thread.threadID, thread.name);
-        await markRuntimeState();
-        await announceSessionMetadata(sessionID, "Session created", thread.threadID);
-
-        const promptBody: JsonObject = {
-            parts: [{ type: "text", text: plan.prompt }],
-        };
-        if (config.agent) promptBody.agent = config.agent;
-        if (plan.model) {
-            promptBody.model = { providerID: plan.model.providerID, modelID: plan.model.modelID };
-            if (plan.model.variant) promptBody.variant = plan.model.variant;
-        }
-
-        await callSessionPrompt("promptAsync", sessionID, targetDirectory, promptBody);
     }
 
     async function promptActiveSession(prompt: string, context: CommandContext): Promise<void> {
