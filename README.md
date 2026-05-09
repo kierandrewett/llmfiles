@@ -27,6 +27,7 @@ just install-claude-skills                    # ~/.claude/skills
 
 just opencode-bridge status                   # check the standalone OpenCode bridge
 just opencode-bridge-check                    # typecheck and test the bridge app
+just opencode-plugin-check                    # typecheck and smoke-test OpenCode plugins
 
 just install-opencode /tmp/opencode           # custom target
 just install-local-skill ntfy /tmp/skills     # one local skill to any target
