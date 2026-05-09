@@ -1,4 +1,10 @@
 import type { SendDiscordMessageInput } from "./discord.js";
+import {
+    sessionErrorFromEvent,
+    toolUpdateFromEvent,
+    type OpenCodeSessionError,
+    type OpenCodeToolUpdate,
+} from "./event-summaries.js";
 import type { OpenCodeEvent } from "./opencode.js";
 import { permissionRequestFromEvent, type OpenCodePermissionRequest } from "./permissions.js";
 import { type BridgeBindingState, loadOrCreateBridgeState } from "./state.js";
@@ -36,6 +42,7 @@ export class DiscordEventRelay {
     private readonly clearTimer: (timer: NodeJS.Timeout) => void;
     private readonly progress = new Map<string, TextProgress>();
     private readonly buffers = new Map<string, StreamBuffer>();
+    private readonly deliveredToolUpdates = new Set<string>();
 
     constructor(dependencies: DiscordEventRelayDependencies) {
         this.statePath = dependencies.statePath;
@@ -49,6 +56,18 @@ export class DiscordEventRelay {
         const permission = permissionRequestFromEvent(event);
         if (permission) {
             await this.relayPermission(permission);
+            return;
+        }
+
+        const sessionError = sessionErrorFromEvent(event);
+        if (sessionError) {
+            await this.relaySessionError(sessionError);
+            return;
+        }
+
+        const toolUpdate = toolUpdateFromEvent(event);
+        if (toolUpdate) {
+            await this.relayToolUpdate(toolUpdate);
             return;
         }
 
@@ -169,6 +188,23 @@ export class DiscordEventRelay {
         }
     }
 
+    private async relayToolUpdate(update: OpenCodeToolUpdate): Promise<void> {
+        if (this.deliveredToolUpdates.has(update.key)) {
+            return;
+        }
+
+        this.deliveredToolUpdates.add(update.key);
+        for (const binding of await this.discordBindings(update.sessionID)) {
+            await this.send(binding, formatDiscordToolUpdate(update));
+        }
+    }
+
+    private async relaySessionError(error: OpenCodeSessionError): Promise<void> {
+        for (const binding of await this.discordBindings(error.sessionID)) {
+            await this.send(binding, formatDiscordSessionError(error));
+        }
+    }
+
     private async send(binding: BridgeBindingState, content: string): Promise<void> {
         if (!binding.surface.channelID) {
             return;
@@ -179,6 +215,32 @@ export class DiscordEventRelay {
             content,
         });
     }
+}
+
+function formatDiscordToolUpdate(update: OpenCodeToolUpdate): string {
+    return [
+        `[bridge] ${toolStatusLabel(update.status)}: ${update.tool}`,
+        `[bridge] detail: ${update.title}`,
+    ].join("\n");
+}
+
+function formatDiscordSessionError(error: OpenCodeSessionError): string {
+    return [
+        "[bridge] session error",
+        `[bridge] session: ${error.sessionID}`,
+        `[bridge] error: ${error.message}`,
+    ].join("\n");
+}
+
+function toolStatusLabel(status: OpenCodeToolUpdate["status"]): string {
+    if (status === "running") {
+        return "tool started";
+    }
+    if (status === "completed") {
+        return "tool completed";
+    }
+
+    return "tool failed";
 }
 
 function formatDiscordPermission(permission: OpenCodePermissionRequest): string {
