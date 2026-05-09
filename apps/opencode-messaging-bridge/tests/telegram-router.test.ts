@@ -308,15 +308,23 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
 }
 
 function update(userID: string, chatID: string, text: string, threadID: string | null = null, chatType?: string): TelegramUpdate {
+    const message = {
+        messageID: 10,
+        threadID,
+        userID,
+        chatID,
+        text,
+    };
+
+    if (chatType) {
+        return {
+            updateID: 1,
+            message: { ...message, chatType },
+        };
+    }
+
     return {
         updateID: 1,
-        message: {
-            messageID: 10,
-            threadID,
-            userID,
-            chatID,
-            chatType,
-            text,
-        },
+        message,
     };
 }

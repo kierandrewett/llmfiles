@@ -236,6 +236,7 @@ function bridgeConfig(statePath: string): BridgeConfig {
             botToken: null,
             allowedUserIDs: [],
             allowedChatIDs: [],
+            createTopics: false,
         },
         discord: {
             enabled: true,

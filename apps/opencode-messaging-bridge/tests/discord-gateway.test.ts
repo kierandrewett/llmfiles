@@ -293,6 +293,7 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             botToken: null,
             allowedUserIDs: [],
             allowedChatIDs: [],
+            createTopics: false,
         },
         discord: {
             enabled: true,
