@@ -2,8 +2,7 @@
 
 Standalone daemon for controlling OpenCode sessions from Telegram or Discord.
 
-This package implements the Phase 1 foundation and the first Telegram inbound slice from
-`../../docs/opencode-messaging-bridge.md`:
+This package implements the standalone bridge described in `../../docs/opencode-messaging-bridge.md`:
 
 - environment config parsing
 - atomic JSON state storage
@@ -22,6 +21,7 @@ It does not handle OpenCode permission replies from Telegram or Discord yet.
 
 - [How Docker control works](#how-docker-control-works)
 - [Control surface support](#control-surface-support)
+- [Discord quickstart](#discord-quickstart)
 - [Telegram setup](#telegram-setup)
 - [Discord setup](#discord-setup)
 - [Local setup](#local-setup)
@@ -56,6 +56,66 @@ assistant text back to the bound chat or channel.
 The older `plugins/opencode/discord-remote-control.ts` plugin still exists and has extra plugin-specific behaviour such as
 session threads, forum intake, and permission replies. The standalone daemon is now the proper Docker/server path for core
 Discord control: `status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, and assistant text relay.
+
+## Discord quickstart
+
+Use this path when you want Discord remote control through the standalone bridge. It keeps OpenCode HTTP on loopback and
+uses Discord as the only exposed control surface.
+
+From the repo root, run a local daemon with a bridge-managed `opencode serve` process:
+
+```bash
+export OPENCODE_BRIDGE_DISCORD_BOT_TOKEN="replace-with-real-token"
+export OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
+export OPENCODE_BRIDGE_MANAGE_OPENCODE="1"
+export OPENCODE_BRIDGE_OPENCODE_HOST="127.0.0.1"
+export OPENCODE_BRIDGE_OPENCODE_PORT="4096"
+export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
+
+just opencode-bridge discord
+```
+
+For Docker Compose, copy and edit the example files from this package directory:
+
+```bash
+cp .env.example .env
+mkdir -p "$HOME/.config/opencode-messaging-bridge"
+cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
+$EDITOR .env
+$EDITOR "$HOME/.config/opencode-messaging-bridge/env"
+```
+
+Set this in `.env`:
+
+```bash
+OPENCODE_BRIDGE_COMMAND=discord
+```
+
+Keep the Discord token block in the private runtime env file and remove the Telegram token block if you are not running
+Telegram. Then start the container:
+
+```bash
+docker compose up -d --build
+docker compose logs -f opencode-bridge
+```
+
+Smoke test from the configured Discord control channel:
+
+```text
+/oc status
+/oc sessions
+/oc new Discord smoke test
+/oc prompt what repository are you running in?
+/oc abort
+```
+
+Slash commands do not need Discord's Message Content privileged intent. Enable Message Content only if you want `!oc ...`
+prefix commands or plain-text guild replies, then set `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in the private
+runtime env.
 
 ## Telegram setup
 
@@ -145,7 +205,14 @@ export OPENCODE_BRIDGE_IMPLICIT_REPLY="0"
 testing. If it is unset, registration is global and Discord may take longer to show the command. The daemon caches the
 registered command signature in bridge state so normal reconnects do not repeatedly upsert the command.
 
-Start the local Discord daemon after those variables are set:
+Start the local Discord daemon after those variables and the OpenCode target from [Local setup](#local-setup) are set. From
+the repo root:
+
+```bash
+just opencode-bridge discord
+```
+
+Or from this package directory:
 
 ```bash
 yarn start discord
@@ -299,7 +366,8 @@ cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
 $EDITOR "$HOME/.config/opencode-messaging-bridge/env"
 ```
 
-Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run:
+Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run. Use Discord for the standalone
+Discord bridge:
 
 ```bash
 OPENCODE_BRIDGE_COMMAND=discord
@@ -324,6 +392,12 @@ Start the bridge:
 ```bash
 docker compose up -d --build
 docker compose logs -f opencode-bridge
+```
+
+You can also override the command for one Compose invocation without editing `.env`:
+
+```bash
+OPENCODE_BRIDGE_COMMAND=discord docker compose up -d --build
 ```
 
 Stop or restart it:

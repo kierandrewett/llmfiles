@@ -1,7 +1,7 @@
 # OpenCode messaging bridge plan
 
-Status: draft design with Phase 1 implemented, the first Telegram inbound/output slice working, and optional managed
-OpenCode process/Docker runtime support in place, May 2026.
+Status: design note with Phase 1, Telegram command routing/output, Discord Gateway/REST command routing/output, optional
+managed OpenCode process support, and Docker Compose runtime support in place, May 2026.
 
 This document defines a standalone, always-on messaging bridge for OpenCode. It is the next step after the Discord remote-control plugin prototype. The plugin proved the UX and the platform edge cases, but it also showed the wrong lifecycle: a plugin attached to an OpenCode worker can exit before slow Discord retries, thread recovery, or cross-platform routing has finished.
 
@@ -432,6 +432,11 @@ Verification:
 
 ### Phase 4: Discord adapter without thread dependency
 
+Current status: Discord Gateway ownership, REST responses, allowlisted control-channel routing, slash commands, optional
+prefix commands, Gateway resume metadata, session binding, prompt sends, aborts, and assistant text relay are implemented
+in `apps/opencode-messaging-bridge/`. The remaining gaps are permission replies, optional explicit thread binding, and
+live smoke testing against the real Discord bot runtime.
+
 Acceptance criteria:
 
 - Discord Gateway connection is owned by the daemon, not the OpenCode plugin.
@@ -464,10 +469,12 @@ Verification:
 
 ## Next steps
 
-Phase 1, the Telegram inbound/output command slice, managed process supervision, and Docker packaging now live in
-`llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to harden Telegram output fidelity and smoke
-test the real runtime:
+Phase 1, Telegram control, Discord control, managed process supervision, and Docker Compose packaging now live in
+`llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to smoke test the real runtimes and fill the
+remaining event-fidelity gaps:
 
+- smoke test the continuous `discord` command against the private Discord control channel, once with an external
+  `opencode serve` and once through Docker Compose with `OPENCODE_BRIDGE_COMMAND=discord`
 - smoke test the continuous `telegram` command against a private Telegram chat, once with an external `opencode serve`
   and once with `OPENCODE_BRIDGE_MANAGE_OPENCODE=1`
 - build and run the Docker image with mounted `~/.local/share/opencode`, mounted `~/.config/opencode`, a

@@ -39,8 +39,40 @@ If `~/.config/opencode/plugins` already exists as a real directory, `just instal
 
 ## OpenCode remote control
 
-The standalone bridge can run in Docker Compose and let an allowlisted Telegram chat or Discord channel control an
-OpenCode session. Start with the package README:
+Yes, Discord can run through the standalone bridge. The daemon is the main path for server or Docker-based remote
+control now; the older Discord plugin is still available for plugin-specific OpenCode behaviour.
+
+For local Discord control from the repo root, set the Discord env vars and let the bridge start `opencode serve` on
+loopback:
+
+```bash
+export OPENCODE_BRIDGE_DISCORD_BOT_TOKEN="replace-with-real-token"
+export OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"
+export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
+export OPENCODE_BRIDGE_MANAGE_OPENCODE="1"
+export OPENCODE_BRIDGE_OPENCODE_HOST="127.0.0.1"
+export OPENCODE_BRIDGE_OPENCODE_PORT="4096"
+export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
+
+just opencode-bridge discord
+```
+
+For Docker Compose, set `OPENCODE_BRIDGE_COMMAND=discord` in
+`apps/opencode-messaging-bridge/.env`, put real Discord tokens in the private runtime env file outside the repo, then run:
+
+```bash
+cd apps/opencode-messaging-bridge
+docker compose up -d --build
+docker compose logs -f opencode-bridge
+```
+
+Slash commands work without Discord's Message Content privileged intent. Enable Message Content only if you want `!oc ...`
+prefix commands or plain-text guild replies.
+
+Start with the package README for the full setup, env files, Docker mounts, and smoke tests:
 
 ```text
 apps/opencode-messaging-bridge/README.md
@@ -48,8 +80,7 @@ apps/opencode-messaging-bridge/README.md
 
 The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth/config and the target repo at
 runtime, and stores Telegram offsets, Discord Gateway resume state, slash-command registration signatures, and session
-bindings in a Docker volume. The older Discord plugin still exists at `plugins/opencode/discord-remote-control.md` for
-plugin-specific features, but core Discord remote control now lives in the daemon.
+bindings in a Docker volume.
 
 ## Sync notes
 
