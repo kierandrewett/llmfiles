@@ -1,3 +1,4 @@
+import { sessionErrorFromEvent, toolUpdateFromEvent, type OpenCodeSessionError, type OpenCodeToolUpdate } from "./event-summaries.js";
 import type { OpenCodeEvent } from "./opencode.js";
 import { permissionRequestFromEvent, type OpenCodePermissionRequest } from "./permissions.js";
 import { type BridgeBindingState, loadOrCreateBridgeState } from "./state.js";
@@ -49,6 +50,7 @@ export class TelegramEventRelay {
     private readonly clearTimer: (timer: NodeJS.Timeout) => void;
     private readonly buffers = new Map<string, StreamBuffer>();
     private readonly previews = new Map<string, TelegramDeliveryPreview>();
+    private readonly deliveredToolUpdates = new Set<string>();
 
     constructor(dependencies: TelegramEventRelayDependencies) {
         this.statePath = dependencies.statePath;
@@ -62,6 +64,18 @@ export class TelegramEventRelay {
         const permission = permissionRequestFromEvent(event);
         if (permission) {
             await this.relayPermission(permission);
+            return;
+        }
+
+        const sessionError = sessionErrorFromEvent(event);
+        if (sessionError) {
+            await this.relaySessionError(sessionError);
+            return;
+        }
+
+        const toolUpdate = toolUpdateFromEvent(event);
+        if (toolUpdate) {
+            await this.relayToolUpdate(toolUpdate);
             return;
         }
 
@@ -216,6 +230,53 @@ export class TelegramEventRelay {
         }
     }
 
+    private async relayToolUpdate(update: OpenCodeToolUpdate): Promise<void> {
+        if (this.deliveredToolUpdates.has(update.key)) {
+            return;
+        }
+
+        this.deliveredToolUpdates.add(update.key);
+        for (const binding of await this.telegramBindings(update.sessionID)) {
+            await this.sendToolUpdate(binding, update);
+        }
+    }
+
+    private async sendToolUpdate(binding: BridgeBindingState, update: OpenCodeToolUpdate): Promise<void> {
+        if (!binding.surface.chatID) {
+            return;
+        }
+
+        for (const chunk of chunkTelegramText(formatTelegramToolUpdate(update))) {
+            await this.telegram.sendMessage({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                text: chunk,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+        }
+    }
+
+    private async relaySessionError(error: OpenCodeSessionError): Promise<void> {
+        for (const binding of await this.telegramBindings(error.sessionID)) {
+            await this.sendSessionError(binding, error);
+        }
+    }
+
+    private async sendSessionError(binding: BridgeBindingState, error: OpenCodeSessionError): Promise<void> {
+        if (!binding.surface.chatID) {
+            return;
+        }
+
+        for (const chunk of chunkTelegramText(formatTelegramSessionError(error))) {
+            await this.telegram.sendMessage({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                text: chunk,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+        }
+    }
+
     private async updatePreview(key: string, binding: BridgeBindingState, text: string): Promise<void> {
         if (!binding.surface.chatID) {
             return;
@@ -341,6 +402,32 @@ function formatTelegramPermission(permission: OpenCodePermissionRequest): string
         bridgeField(permission.patterns.length === 1 ? "pattern" : "patterns", patternText),
         bridgeLine(`${escapeTelegramMarkdown("reply")}: ${markdownCode(`/oc allow ${permission.id}`)}, ${markdownCode(`/oc always ${permission.id}`)}, or ${markdownCode(`/oc deny ${permission.id}`)}`),
     ].join("\n");
+}
+
+function formatTelegramToolUpdate(update: OpenCodeToolUpdate): string {
+    return [
+        bridgeLine(`${escapeTelegramMarkdown(toolStatusLabel(update.status))}: ${markdownCode(update.tool)}`),
+        bridgeTextField("detail", update.title),
+    ].join("\n");
+}
+
+function formatTelegramSessionError(error: OpenCodeSessionError): string {
+    return [
+        bridgePlain("session error"),
+        bridgeField("session", error.sessionID),
+        bridgeTextField("error", error.message),
+    ].join("\n");
+}
+
+function toolStatusLabel(status: OpenCodeToolUpdate["status"]): string {
+    if (status === "running") {
+        return "tool started";
+    }
+    if (status === "completed") {
+        return "tool completed";
+    }
+
+    return "tool failed";
 }
 
 function bridgePlain(text: string): string {
