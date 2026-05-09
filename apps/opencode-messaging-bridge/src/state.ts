@@ -30,6 +30,21 @@ export interface BridgeBindingState {
     updatedAt: string;
 }
 
+export interface BridgeScheduledJobState {
+    id: string;
+    platform: BridgePlatform;
+    surfaceID: string;
+    surface: BridgeSurfaceAddress;
+    sessionID: string;
+    prompt: string;
+    intervalMinutes: number;
+    nextRunAt: string;
+    lastRunAt: string | null;
+    lastError: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
 export interface BridgeState {
     version: 1;
     updatedAt: string;
@@ -45,6 +60,7 @@ export interface BridgeState {
     };
     surfaces: BridgeSurfaceState[];
     bindings: BridgeBindingState[];
+    jobs: BridgeScheduledJobState[];
     deliveries: Record<string, unknown>[];
 }
 
@@ -64,6 +80,7 @@ export function createDefaultBridgeState(now = new Date()): BridgeState {
         },
         surfaces: [],
         bindings: [],
+        jobs: [],
         deliveries: [],
     };
 }
@@ -130,6 +147,7 @@ function parseBridgeState(value: unknown, source: string): BridgeState {
         },
         surfaces: requireArray(record.surfaces, `${source}.surfaces`).map((entry, index) => parseSurfaceState(entry, `${source}.surfaces[${index}]`)),
         bindings: requireArray(record.bindings, `${source}.bindings`).map((entry, index) => parseBindingState(entry, `${source}.bindings[${index}]`)),
+        jobs: readOptionalArray(record.jobs, `${source}.jobs`).map((entry, index) => parseScheduledJobState(entry, `${source}.jobs[${index}]`)),
         deliveries: requireArray(record.deliveries, `${source}.deliveries`).map((entry, index) => requireRecord(entry, `${source}.deliveries[${index}]`)),
     };
 }
@@ -156,6 +174,25 @@ function parseBindingState(value: unknown, source: string): BridgeBindingState {
         sessionID: requireString(record.sessionID, `${source}.sessionID`),
         directory: requireNullableString(record.directory, `${source}.directory`),
         title: requireNullableString(record.title, `${source}.title`),
+        createdAt: requireString(record.createdAt, `${source}.createdAt`),
+        updatedAt: requireString(record.updatedAt, `${source}.updatedAt`),
+    };
+}
+
+function parseScheduledJobState(value: unknown, source: string): BridgeScheduledJobState {
+    const record = requireRecord(value, source);
+
+    return {
+        id: requireString(record.id, `${source}.id`),
+        platform: requirePlatform(record.platform, `${source}.platform`),
+        surfaceID: requireString(record.surfaceID, `${source}.surfaceID`),
+        surface: parseSurfaceAddress(record.surface, `${source}.surface`),
+        sessionID: requireString(record.sessionID, `${source}.sessionID`),
+        prompt: requireString(record.prompt, `${source}.prompt`),
+        intervalMinutes: requirePositiveInteger(record.intervalMinutes, `${source}.intervalMinutes`),
+        nextRunAt: requireString(record.nextRunAt, `${source}.nextRunAt`),
+        lastRunAt: requireNullableString(record.lastRunAt, `${source}.lastRunAt`),
+        lastError: requireNullableString(record.lastError, `${source}.lastError`),
         createdAt: requireString(record.createdAt, `${source}.createdAt`),
         updatedAt: requireString(record.updatedAt, `${source}.updatedAt`),
     };
@@ -217,6 +254,14 @@ function requireArray(value: unknown, source: string): unknown[] {
     return value;
 }
 
+function readOptionalArray(value: unknown, source: string): unknown[] {
+    if (value === undefined) {
+        return [];
+    }
+
+    return requireArray(value, source);
+}
+
 function requireString(value: unknown, source: string): string {
     if (typeof value !== "string" || value.length === 0) {
         throw new Error(`${source} must be a non-empty string`);
@@ -239,6 +284,14 @@ function requireNullableNumber(value: unknown, source: string): number | null {
     }
     if (typeof value !== "number" || !Number.isFinite(value)) {
         throw new Error(`${source} must be a finite number or null`);
+    }
+
+    return value;
+}
+
+function requirePositiveInteger(value: unknown, source: string): number {
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+        throw new Error(`${source} must be a positive integer`);
     }
 
     return value;
