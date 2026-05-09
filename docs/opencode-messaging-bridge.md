@@ -396,9 +396,9 @@ Verification:
 ### Phase 2: Telegram inbound and outbound MVP
 
 Current status: Telegram long polling, allowlist checks, command responses, session binding, session creation, prompt
-sends, abort commands, assistant text relay from OpenCode server-sent events, optional managed `opencode serve`, and a
-Docker runtime are implemented in `apps/opencode-messaging-bridge/`. The remaining Phase 2 gaps are live smoke testing
-and polishing output fidelity.
+sends, abort commands, permission replies, assistant text relay from OpenCode server-sent events, optional managed
+`opencode serve`, and a Docker runtime are implemented in `apps/opencode-messaging-bridge/`. The remaining Phase 2 gaps
+are live smoke testing and polishing output fidelity.
 
 Acceptance criteria:
 
@@ -433,8 +433,8 @@ Verification:
 ### Phase 4: Discord adapter without thread dependency
 
 Current status: Discord Gateway ownership, REST responses, allowlisted control-channel routing, slash commands, optional
-prefix commands, Gateway resume metadata, session binding, prompt sends, aborts, and assistant text relay are implemented
-in `apps/opencode-messaging-bridge/`. The remaining gaps are permission replies, optional explicit thread binding, and
+prefix commands, Gateway resume metadata, session binding, prompt sends, aborts, permission replies, and assistant text
+relay are implemented in `apps/opencode-messaging-bridge/`. The remaining gaps are optional explicit thread binding and
 live smoke testing against the real Discord bot runtime.
 
 Acceptance criteria:

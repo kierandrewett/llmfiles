@@ -6,17 +6,18 @@ This package implements the standalone bridge described in `../../docs/opencode-
 
 - environment config parsing
 - atomic JSON state storage
-- OpenCode HTTP client for health checks, session listing, session creation, prompt sends, and aborts
+- OpenCode HTTP client for health checks, session listing, session creation, prompt sends, aborts, and permission replies
 - Telegram Bot API long polling, command-menu registration, reactions, MarkdownV2 text responses, and streaming previews
 - Discord Gateway, REST, slash-command, and prefix-command handling
 - allowlisted Telegram command routing for `/oc ...` subcommands and first-class menu commands such as `/status`,
-  `/sessions`, `/attach`, `/new`, `/prompt`, `/reply`, and `/abort`
+  `/sessions`, `/attach`, `/new`, `/prompt`, `/reply`, `/abort`, `/allow`, `/always`, and `/deny`
 - OpenCode server-sent event relay for bound Telegram and Discord sessions, including Telegram draft/edit previews for
-  assistant text parts
+  assistant text parts and permission prompts
 - optional OpenCode process supervision for `opencode serve`
 - CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
-It does not handle OpenCode permission replies from Telegram or Discord yet.
+OpenCode stays the agent. The bridge only forwards prompts, relays session output, and routes OpenCode permission requests
+back to the OpenCode server.
 
 ## Contents
 
@@ -55,8 +56,8 @@ assistant text back to the bound chat or channel.
 | Discord | Standalone bridge app, Docker, or Docker Compose | Implemented here |
 
 The older `plugins/opencode/discord-remote-control.ts` plugin still exists and has extra plugin-specific behaviour such as
-session threads, forum intake, and permission replies. The standalone daemon is now the proper Docker/server path for core
-Discord control: `status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, and assistant text relay.
+session threads and forum intake. The standalone daemon is now the proper Docker/server path for core Discord control:
+`status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, permission replies, and assistant text relay.
 
 ## Discord quickstart
 
@@ -112,6 +113,7 @@ Smoke test from the configured Discord control channel:
 /oc sessions
 /oc new Discord smoke test
 /oc prompt what repository are you running in?
+/oc allow per_123
 /oc abort
 ```
 
@@ -155,9 +157,9 @@ curl -s -X POST "https://api.telegram.org/bot${OPENCODE_BRIDGE_TELEGRAM_BOT_TOKE
 ```
 
 On the first poll, the bridge calls Telegram `setMyCommands` so the bot menu exposes `/status`, `/sessions`, `/attach`,
-`/new`, `/prompt`, `/reply`, and `/abort`. The older `/oc ...` form still works, which is useful in groups where you want
-one command namespace. Bridge-generated responses use Telegram MarkdownV2 and successful commands get a best-effort
-reaction. Reaction failures from Telegram are ignored so command handling still completes.
+`/new`, `/prompt`, `/reply`, `/abort`, `/allow`, `/always`, and `/deny`. The older `/oc ...` form still works, which is
+useful in groups where you want one command namespace. Bridge-generated responses use Telegram MarkdownV2 and successful
+commands get a best-effort reaction. Reaction failures from Telegram are ignored so command handling still completes.
 
 For assistant output, the bridge uses Telegram's newer AI-agent path where it can. Private chats receive ephemeral
 `sendMessageDraft` updates while OpenCode is still generating, followed by a final persisted `sendMessage` when the session
@@ -173,6 +175,7 @@ Send these messages to the allowlisted Telegram chat:
 /status
 /oc new Docker bridge smoke test
 /oc prompt what repository are you running in?
+/oc allow per_123
 /oc abort
 ```
 
@@ -184,6 +187,8 @@ Expected result:
 - If `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1`, `/oc new` creates a Telegram topic first and binds the session to that
   topic. Existing topic commands keep binding to the topic they were sent from.
 - `/oc prompt` sends text to the bound OpenCode session.
+- When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
+  `/oc allow <permission-id>`, `/oc always <permission-id>`, or `/oc deny <permission-id> [feedback]`.
 - Assistant text is relayed back into Telegram from the OpenCode event stream using MarkdownV2-safe escaping. Private chats
   should show draft-style streaming while generation is in progress; groups should see a bot message update in place.
 
@@ -249,6 +254,7 @@ Then smoke test from Discord:
 /oc sessions
 /oc new Discord smoke test
 /oc prompt what repository are you running in?
+/oc allow per_123
 /oc abort
 ```
 
@@ -258,6 +264,7 @@ If you enabled `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1`, prefix comman
 !oc status
 !oc new Discord daemon smoke test
 !oc prompt what repository are you running in?
+!oc deny per_123 not safe
 ```
 
 Expected result:
@@ -265,6 +272,8 @@ Expected result:
 - `/oc status` reports OpenCode health and the active Discord channel session.
 - `/oc new` creates and binds a session to that Discord channel.
 - `/oc prompt` sends text to the bound OpenCode session.
+- When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
+  `/oc allow <permission-id>`, `/oc always <permission-id>`, or `/oc deny <permission-id> [feedback]`.
 - Assistant text is relayed back into Discord from the OpenCode event stream.
 
 Plugin-specific details for the older OpenCode plugin live in `../../plugins/opencode/discord-remote-control.md`.
