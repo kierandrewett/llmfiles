@@ -342,37 +342,55 @@ export function discordGatewayIntents(config: BridgeConfig): number {
 }
 
 function createDefaultSocket(url: string): DiscordGatewaySocket {
-    const socket = new WebSocket(url);
+    return new DefaultDiscordGatewaySocket(url);
+}
 
-    return {
-        get readyState(): number {
-            return socket.readyState;
-        },
-        send(data: string): void {
-            socket.send(data);
-        },
-        close(code?: number, reason?: string): void {
-            socket.close(code, reason);
-        },
-        addEventListener(type, listener): void {
-            if (type === "message") {
-                socket.addEventListener("message", (event) => {
-                    listener({ data: event.data });
-                });
-                return;
-            }
-            if (type === "close") {
-                socket.addEventListener("close", (event) => {
-                    listener({ code: event.code, reason: event.reason });
-                });
-                return;
-            }
+class DefaultDiscordGatewaySocket implements DiscordGatewaySocket {
+    private readonly socket: WebSocket;
 
-            socket.addEventListener("error", () => {
-                listener({ error: new Error("Discord gateway socket error") });
+    constructor(url: string) {
+        this.socket = new WebSocket(url);
+    }
+
+    get readyState(): number {
+        return this.socket.readyState;
+    }
+
+    send(data: string): void {
+        this.socket.send(data);
+    }
+
+    close(code?: number, reason?: string): void {
+        this.socket.close(code, reason);
+    }
+
+    addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+    addEventListener(type: "close", listener: (event: { code: number; reason: string }) => void): void;
+    addEventListener(type: "error", listener: (event: { error?: unknown }) => void): void;
+    addEventListener(
+        type: "message" | "close" | "error",
+        listener: ((event: { data: unknown }) => void) | ((event: { code: number; reason: string }) => void) | ((event: { error?: unknown }) => void),
+    ): void {
+        if (type === "message") {
+            const messageListener = listener as (event: { data: unknown }) => void;
+            this.socket.addEventListener("message", (event) => {
+                messageListener({ data: event.data });
             });
-        },
-    };
+            return;
+        }
+        if (type === "close") {
+            const closeListener = listener as (event: { code: number; reason: string }) => void;
+            this.socket.addEventListener("close", (event) => {
+                closeListener({ code: event.code, reason: event.reason });
+            });
+            return;
+        }
+
+        const errorListener = listener as (event: { error?: unknown }) => void;
+        this.socket.addEventListener("error", () => {
+            errorListener({ error: new Error("Discord gateway socket error") });
+        });
+    }
 }
 
 function gatewayUrlWithQuery(value: string): string {

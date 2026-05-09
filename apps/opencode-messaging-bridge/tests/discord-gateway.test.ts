@@ -59,7 +59,7 @@ describe("DiscordGatewayRunner", () => {
                 application: { id: "ready-app-id" },
             },
         });
-        await flushAsyncWork();
+        await waitFor(() => fixture.discord.registrations.length === 1);
         socket.emitClose();
 
         assert.equal(await run, 1);
@@ -132,7 +132,7 @@ describe("DiscordGatewayRunner", () => {
                 data: { name: "oc", type: 1, options: [{ name: "status", type: 1 }] },
             },
         });
-        await flushAsyncWork();
+        await waitFor(() => fixture.router.messages.length === 1 && fixture.router.interactions.length === 1);
         socket.emitClose();
 
         assert.equal(await run, 2);
@@ -314,4 +314,18 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
 async function flushAsyncWork(): Promise<void> {
     await Promise.resolve();
     await Promise.resolve();
+    await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+    });
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (predicate()) {
+            return;
+        }
+        await flushAsyncWork();
+    }
+
+    throw new Error("condition was not met");
 }
