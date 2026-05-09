@@ -1,6 +1,7 @@
 # OpenCode messaging bridge plan
 
-Status: draft design with Phase 1 implemented and the first Telegram inbound slice working, May 2026.
+Status: draft design with Phase 1 implemented, the first Telegram inbound/output slice working, and optional managed
+OpenCode process/Docker runtime support in place, May 2026.
 
 This document defines a standalone, always-on messaging bridge for OpenCode. It is the next step after the Discord remote-control plugin prototype. The plugin proved the UX and the platform edge cases, but it also showed the wrong lifecycle: a plugin attached to an OpenCode worker can exit before slow Discord retries, thread recovery, or cross-platform routing has finished.
 
@@ -32,6 +33,11 @@ These are the source-backed facts the design relies on.
 
 - OpenCode can run as a headless HTTP server with `opencode serve --port <number> --hostname <string>` and exposes an OpenAPI endpoint at `/doc`.
   Source: https://opencode.ai/docs/server/
+- OpenCode's CLI documents `serve` as the headless API server command and supports `--port` and `--hostname` flags.
+  Source: https://opencode.ai/docs/cli/
+- OpenCode provider credentials added through `/connect` are stored in `~/.local/share/opencode/auth.json`, including
+  ChatGPT Plus/Pro and OpenCode Go credentials.
+  Source: https://opencode.ai/docs/providers/
 - OpenCode's SDK can either start a server with `createOpencode()` or connect to an existing one with `createOpencodeClient({ baseUrl })`.
   Source: https://opencode.ai/docs/sdk/
 - OpenCode session APIs cover list, create, update, messages, async prompt, abort, and permission response flows.
@@ -47,6 +53,12 @@ These are the source-backed facts the design relies on.
   Source: https://core.telegram.org/bots/api#sendmessage
 - Telegram `sendChatAction` can show typing for noticeable waits and is cleared when the bot sends a message.
   Source: https://core.telegram.org/bots/api#sendchataction
+- Node's `child_process.spawn()` starts a child process asynchronously with explicit arguments and no shell by default;
+  the bridge uses this for `opencode serve` instead of shell command strings.
+  Source: https://nodejs.org/download/release/v22.13.1/docs/api/child_process.html#child_processspawncommand-args-options
+- Node emits signal events such as `SIGINT` and `SIGTERM`; cleanup hooks should remain explicit when the long-running
+  daemon gains full shutdown orchestration.
+  Source: https://nodejs.org/download/release/v22.13.1/docs/api/process.html#signal-events
 - Discord Gateway requires a persistent WebSocket, heartbeats, sequence tracking, reconnect/resume handling, and intents.
   Source: https://discord.com/developers/docs/topics/gateway
 - Discord message content is privileged for guild messages. Slash commands, DMs, and app mentions reduce the need for raw guild message content.
@@ -100,7 +112,7 @@ The OpenCode adapter owns all OpenCode SDK and HTTP details.
 
 Responsibilities:
 
-- Connect to a configured OpenCode server URL, or optionally spawn a local server in a later phase.
+- Connect to a configured OpenCode server URL, or optionally spawn a local `opencode serve` process.
 - Check health on start.
 - List sessions and statuses.
 - Create sessions with title, directory, model, agent, variant, and permission rules where supported.
@@ -109,7 +121,9 @@ Responsibilities:
 - Fetch recent messages for catch-up after bridge restart.
 - Reply to permission requests using the non-deprecated permission reply endpoint where available.
 
-Important design point: the daemon should prefer connecting to an explicit OpenCode server URL in phase 1. Spawning OpenCode from inside the bridge is useful later, but it mixes process supervision with routing before the routing contract is stable.
+Important design point: the daemon still defaults to an explicit OpenCode server URL. Managed `opencode serve` is opt-in
+through `OPENCODE_BRIDGE_MANAGE_OPENCODE=1`, which keeps the original external-server workflow intact while making the
+Docker/service path self-contained.
 
 ### PlatformAdapter
 
@@ -202,6 +216,12 @@ Suggested environment:
 
 ```bash
 export OPENCODE_BRIDGE_OPENCODE_BASE_URL="http://127.0.0.1:4096"
+export OPENCODE_BRIDGE_MANAGE_OPENCODE="0"
+export OPENCODE_BRIDGE_OPENCODE_COMMAND="opencode"
+export OPENCODE_BRIDGE_OPENCODE_HOST="127.0.0.1"
+export OPENCODE_BRIDGE_OPENCODE_PORT="4096"
+export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
+export OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS="30000"
 export OPENCODE_BRIDGE_STATE_PATH="$HOME/.local/state/opencode-messaging-bridge/state.json"
 
 export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="..."
@@ -213,6 +233,12 @@ export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="..."
 export OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS="..."
 export OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID="..."
 ```
+
+Secrets stay out of the state file and out of git. For container runs, mount OpenCode's auth/config directories and pass
+bridge tokens with `--env-file`, Docker secrets, or another runtime secret mechanism. ChatGPT Plus/Pro and OpenCode Go
+credentials should come from the OpenCode auth file generated by `/connect`, not from committed env examples. Auth mounts
+may need write access for OAuth token refresh, so use a private Docker volume if writing to the host auth directory is not
+acceptable.
 
 ## Platform UX
 
@@ -370,8 +396,9 @@ Verification:
 ### Phase 2: Telegram inbound and outbound MVP
 
 Current status: Telegram long polling, allowlist checks, command responses, session binding, session creation, prompt
-sends, abort commands, and assistant text relay from OpenCode server-sent events are implemented in
-`apps/opencode-messaging-bridge/`. The remaining Phase 2 gaps are live smoke testing and polishing output fidelity.
+sends, abort commands, assistant text relay from OpenCode server-sent events, optional managed `opencode serve`, and a
+Docker runtime are implemented in `apps/opencode-messaging-bridge/`. The remaining Phase 2 gaps are live smoke testing
+and polishing output fidelity.
 
 Acceptance criteria:
 
@@ -385,6 +412,7 @@ Verification:
 
 - Smoke test with mocked Telegram API and mocked OpenCode adapter.
 - Manual private Telegram chat test with a non-secret local env file.
+- Docker smoke test with mounted OpenCode auth/config and a private Telegram chat.
 
 ### Phase 3: OpenCode event fidelity and permission flow
 
@@ -436,10 +464,14 @@ Verification:
 
 ## Next steps
 
-Phase 1 and the Telegram inbound/output command slice now live in `llmfiles/apps/opencode-messaging-bridge/`. The next
-implementation step is to harden Telegram output fidelity:
+Phase 1, the Telegram inbound/output command slice, managed process supervision, and Docker packaging now live in
+`llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to harden Telegram output fidelity and smoke
+test the real runtime:
 
-- smoke test the continuous `telegram` command against a real local `opencode serve` and private Telegram chat
+- smoke test the continuous `telegram` command against a private Telegram chat, once with an external `opencode serve`
+  and once with `OPENCODE_BRIDGE_MANAGE_OPENCODE=1`
+- build and run the Docker image with mounted `~/.local/share/opencode`, mounted `~/.config/opencode`, a
+  project workdir mount, and a private bridge env file
 - decide whether reasoning parts should be sent by default or gated behind a config flag
 - add compact handling for session errors and important failed tool events
 - keep permission request commands deferred to Phase 3 unless the OpenCode event slice exposes a clean endpoint during
