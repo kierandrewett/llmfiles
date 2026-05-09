@@ -19,6 +19,7 @@ describe("createDefaultBridgeState", () => {
         assert.equal(state.version, 1);
         assert.equal(state.updatedAt, "2026-05-09T00:00:00.000Z");
         assert.deepEqual(Object.keys(state.platforms), ["telegram", "discord"]);
+        assert.deepEqual(state.jobs, []);
         assert.equal(JSON.stringify(state).includes("baseUrl"), false);
         assert.equal(JSON.stringify(state).includes("token"), false);
     });
@@ -72,6 +73,18 @@ describe("BridgeStateStore", () => {
         await writeFile(filePath, JSON.stringify({ version: 99 }), "utf8");
 
         await assert.rejects(() => readBridgeState(filePath), /Unsupported bridge state version/);
+    });
+
+    it("loads pre-automation state files without scheduled jobs", async () => {
+        const dir = await createTempDir();
+        const filePath = path.join(dir, "state.json");
+        const legacyState: Record<string, unknown> = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        delete legacyState.jobs;
+        await writeFile(filePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
+
+        const read = await readBridgeState(filePath);
+
+        assert.deepEqual(read.jobs, []);
     });
 });
 
