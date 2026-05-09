@@ -12,9 +12,11 @@ import {
     TELEGRAM_MARKDOWN_PARSE_MODE,
     chunkTelegramText,
     escapeTelegramMarkdown,
+    type CreateForumTopicInput,
     type SendChatActionInput,
     type SendMessageInput,
     type SetMessageReactionInput,
+    type TelegramForumTopic,
     type TelegramMessage,
     type TelegramUpdate,
 } from "./telegram.js";
@@ -36,6 +38,7 @@ export interface TelegramRouterTelegramClient {
     sendMessage(input: SendMessageInput): Promise<unknown>;
     sendChatAction(input: SendChatActionInput): Promise<void>;
     setMessageReaction(input: SetMessageReactionInput): Promise<void>;
+    createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic>;
 }
 
 export interface TelegramBridgeRouterDependencies {
@@ -48,6 +51,11 @@ export interface TelegramBridgeRouterDependencies {
 interface ParsedCommand {
     name: string;
     args: string[];
+}
+
+interface NewSessionSurface {
+    message: TelegramMessage;
+    topicCreationFailed: boolean;
 }
 
 export class TelegramBridgeRouter {
@@ -162,9 +170,31 @@ export class TelegramBridgeRouter {
 
     private async handleNew(message: TelegramMessage, title: string): Promise<void> {
         const session = await this.opencode.createSession(title ? { title } : {});
+        const surface = await this.surfaceForNewSession(message, session, title);
+        const lines = [bridgeLine(`created and attached ${formatSessionLine(session)}`)];
+        if (surface.topicCreationFailed) {
+            lines.push(bridgePlain("topic creation failed; bound this chat instead"));
+        }
 
-        await this.bind(message, session);
-        await this.send(message, bridgeLine(`created and attached ${formatSessionLine(session)}`));
+        await this.bind(surface.message, session);
+        await this.send(surface.message, lines.join("\n"));
+    }
+
+    private async surfaceForNewSession(message: TelegramMessage, session: OpenCodeSession, title: string): Promise<NewSessionSurface> {
+        if (!shouldCreateTopic(this.config, message)) {
+            return { message, topicCreationFailed: false };
+        }
+
+        try {
+            const topic = await this.telegram.createForumTopic({
+                chatID: message.chatID,
+                name: topicNameForSession(session, title),
+            });
+
+            return { message: { ...message, threadID: topic.messageThreadID }, topicCreationFailed: false };
+        } catch {
+            return { message, topicCreationFailed: true };
+        }
     }
 
     private async handlePrompt(message: TelegramMessage, text: string): Promise<void> {
@@ -308,6 +338,26 @@ function surfaceAddress(message: TelegramMessage): BridgeSurfaceAddress {
     }
 
     return address;
+}
+
+function shouldCreateTopic(config: BridgeConfig, message: TelegramMessage): boolean {
+    if (!config.telegram.createTopics || message.threadID !== null) {
+        return false;
+    }
+
+    return message.chatType === "private" || message.chatType === "supergroup";
+}
+
+function topicNameForSession(session: OpenCodeSession, requestedTitle: string): string {
+    return truncateTopicName(normaliseTopicName(requestedTitle) || normaliseTopicName(session.title) || session.id);
+}
+
+function normaliseTopicName(value: string | null | undefined): string {
+    return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function truncateTopicName(value: string): string {
+    return Array.from(value).slice(0, 128).join("");
 }
 
 function findSurface(state: BridgeState, id: string): BridgeSurfaceState | undefined {

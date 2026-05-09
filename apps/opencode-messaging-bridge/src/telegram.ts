@@ -80,6 +80,21 @@ export interface SetMessageReactionInput {
     isBig?: boolean;
 }
 
+export interface CreateForumTopicInput {
+    chatID: string;
+    name: string;
+    iconColor?: number;
+    iconCustomEmojiID?: string;
+}
+
+export interface TelegramForumTopic {
+    messageThreadID: string;
+    name: string;
+    iconColor: number;
+    iconCustomEmojiID: string | null;
+    isNameImplicit: boolean;
+}
+
 export class TelegramBotApiError extends Error {
     readonly method: string;
     readonly errorCode: number | null;
@@ -149,6 +164,11 @@ export class TelegramBotApiClient {
 
     async setMessageReaction(input: SetMessageReactionInput): Promise<void> {
         await this.request("setMessageReaction", telegramReactionBody(input));
+    }
+
+    async createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic> {
+        const result = await this.request("createForumTopic", telegramForumTopicBody(input));
+        return parseForumTopic(result, "Telegram createForumTopic result");
     }
 
     async sendChatAction(input: SendChatActionInput): Promise<void> {
@@ -259,6 +279,22 @@ export function telegramReactionBody(input: SetMessageReactionInput): Record<str
     return body;
 }
 
+export function telegramForumTopicBody(input: CreateForumTopicInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        chat_id: input.chatID,
+        name: input.name,
+    };
+
+    if (input.iconColor !== undefined) {
+        body.icon_color = input.iconColor;
+    }
+    if (input.iconCustomEmojiID !== undefined) {
+        body.icon_custom_emoji_id = input.iconCustomEmojiID;
+    }
+
+    return body;
+}
+
 export function telegramChatActionBody(input: SendChatActionInput): Record<string, unknown> {
     const body: Record<string, unknown> = {
         chat_id: input.chatID,
@@ -307,6 +343,18 @@ function parseSentMessage(value: unknown, source: string): TelegramSentMessage {
 
     return {
         messageID: requireNumber(record.message_id, `${source}.message_id`),
+    };
+}
+
+function parseForumTopic(value: unknown, source: string): TelegramForumTopic {
+    const record = requireRecord(value, source);
+
+    return {
+        messageThreadID: String(requireNumber(record.message_thread_id, `${source}.message_thread_id`)),
+        name: requireString(record.name, `${source}.name`),
+        iconColor: requireNumber(record.icon_color, `${source}.icon_color`),
+        iconCustomEmojiID: readOptionalString(record.icon_custom_emoji_id, `${source}.icon_custom_emoji_id`) ?? null,
+        isNameImplicit: record.is_name_implicit === true,
     };
 }
 

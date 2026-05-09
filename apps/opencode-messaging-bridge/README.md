@@ -135,11 +135,18 @@ Use those values in the bridge runtime env file:
 OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token
 OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS=123456789
 OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS=123456789
+OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=0
 OPENCODE_BRIDGE_IMPLICIT_REPLY=0
 ```
 
 `OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS` is technically optional, but keep it set on a server. Without it, any chat
 from an allowlisted user can control the bridge.
+
+Set `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1` if `/oc new ...` should create a Telegram topic and bind the new OpenCode
+session to that returned `message_thread_id`. The bridge only attempts this when the command is not already inside a
+Telegram thread and the chat type is `private` or `supergroup`. If Telegram rejects the topic creation, for example because
+the supergroup is not a forum or the bot lacks `can_manage_topics`, the session is still created and bound to the current
+chat instead.
 
 If the bot was previously configured with a webhook, remove it before using long polling:
 
@@ -174,6 +181,8 @@ Expected result:
 - `/oc status` reports OpenCode health and the active session.
 - `/status` works from Telegram's command menu and returns the same status response.
 - `/oc new` creates and binds a session to that Telegram chat.
+- If `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1`, `/oc new` creates a Telegram topic first and binds the session to that
+  topic. Existing topic commands keep binding to the topic they were sent from.
 - `/oc prompt` sends text to the bound OpenCode session.
 - Assistant text is relayed back into Telegram from the OpenCode event stream using MarkdownV2-safe escaping. Private chats
   should show draft-style streaming while generation is in progress; groups should see a bot message update in place.
@@ -300,6 +309,7 @@ environment, not in git:
 export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="..."
 export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS="12345"
 export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS="12345" # optional, but recommended
+export OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS="0"         # optional, set to 1 for per-session topics
 ```
 
 For Discord, set the bot token, control channel, and allowlisted users instead:

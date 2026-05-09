@@ -81,7 +81,8 @@ apps/opencode-messaging-bridge/README.md
 
 The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth, a resolved OpenCode config
 directory, and the target repo at runtime, and stores Telegram offsets, Discord Gateway resume state, slash-command
-registration signatures, and session bindings in a Docker volume. It does not need to mount this repo.
+registration signatures, and session bindings in a Docker volume. Telegram can also opt into per-session topic creation
+with `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1`. It does not need to mount this repo.
 
 ## Sync notes
 

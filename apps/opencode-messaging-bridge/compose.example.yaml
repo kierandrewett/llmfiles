@@ -52,9 +52,11 @@ services:
       # 2. Send the bot one message from the chat you want to control OpenCode from.
       # 3. Visit https://api.telegram.org/botYOUR_TOKEN/getUpdates to copy from.id and chat.id.
       # 4. Keep ALLOWED_CHAT_IDS set on a server so one allowed user cannot use the bot from any chat.
+      # 5. Set CREATE_TOPICS to 1 only if the bot may create Telegram topics for /oc new.
       OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN: "123456789:replace-with-real-token"
       OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS: "123456789"
       OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS: "123456789"
+      OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS: "0"
     volumes:
       # OpenCode auth from /connect. This may need write access for token refresh.
       - "/home/kieran/.local/share/opencode:/home/node/.local/share/opencode"

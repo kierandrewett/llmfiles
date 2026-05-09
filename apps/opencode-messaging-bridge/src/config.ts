@@ -31,6 +31,7 @@ export interface BridgeConfig {
         botToken: string | null;
         allowedUserIDs: string[];
         allowedChatIDs: string[];
+        createTopics: boolean;
     };
     discord: {
         enabled: boolean;
@@ -101,6 +102,7 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
             botToken: telegramBotToken,
             allowedUserIDs: telegramAllowedUserIDs,
             allowedChatIDs: telegramAllowedChatIDs,
+            createTopics: parseBoolean(env.OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS),
         },
         discord: {
             enabled: discordBotToken !== null && discordControlChannelID !== null && discordAllowedUserIDs.length > 0,
