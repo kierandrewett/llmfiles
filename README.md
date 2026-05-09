@@ -34,6 +34,18 @@ just install-local-skill ntfy /tmp/skills     # one local skill to any target
 
 Existing real files are skipped. Existing symlinks are relinked.
 
+## OpenCode from Telegram
+
+The standalone bridge can run in Docker and let an allowlisted Telegram chat control an OpenCode session. Start with the
+package README:
+
+```text
+apps/opencode-messaging-bridge/README.md
+```
+
+The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth/config and the target repo at
+runtime, and stores Telegram offsets plus session bindings in a Docker volume.
+
 ## Sync notes
 
 Do not commit runtime state or secrets. This repo excludes dependency folders, caches, logs, `.env` files, private keys, zip archives, and other secret-shaped files.

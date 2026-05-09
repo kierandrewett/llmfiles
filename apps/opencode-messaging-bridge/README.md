@@ -1,6 +1,6 @@
 # OpenCode messaging bridge
 
-Standalone daemon for routing Telegram and Discord messages into OpenCode sessions.
+Standalone daemon for controlling OpenCode sessions from Telegram.
 
 This package implements the Phase 1 foundation and the first Telegram inbound slice from
 `../../docs/opencode-messaging-bridge.md`:
@@ -16,6 +16,22 @@ This package implements the Phase 1 foundation and the first Telegram inbound sl
 - CLI commands for checking the configured OpenCode server and running Telegram polling
 
 It does not start Discord or handle OpenCode permission replies from Telegram yet.
+
+## How Docker control works
+
+The Docker image runs one bridge process. By default that bridge starts `opencode serve` inside the same container and
+connects to it on loopback.
+
+```text
+Telegram app -> Telegram Bot API -> bridge container -> opencode serve
+                                                ^
+                                                |
+                                  mounted project/auth/config/state
+```
+
+No OpenCode HTTP port needs to be exposed. The container only needs outbound network access for Telegram and whichever
+model provider OpenCode uses. Telegram sends updates to the bot API, the bridge long-polls those updates, sends prompts to
+OpenCode, then relays assistant text back to the bound Telegram chat.
 
 ## Setup
 
@@ -102,28 +118,50 @@ For a repeatable OpenCode version, pass the installer version from the OpenCode 
 docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge .
 ```
 
-Run it with secrets and credentials mounted at runtime. Do not bake tokens into the image:
+Create an untracked environment file on the host. Do not commit this file.
 
 ```bash
-docker run --rm \
+mkdir -p "$HOME/.config/opencode-messaging-bridge"
+$EDITOR "$HOME/.config/opencode-messaging-bridge/env"
+```
+
+Use this shape:
+
+```bash
+OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token
+OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS=123456789
+OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS=123456789
+OPENCODE_BRIDGE_MANAGE_OPENCODE=1
+OPENCODE_BRIDGE_OPENCODE_HOST=127.0.0.1
+OPENCODE_BRIDGE_OPENCODE_PORT=4096
+```
+
+Run the container with secrets, OpenCode credentials, the target project, and bridge state mounted at runtime:
+
+```bash
+docker run -d \
   --name opencode-bridge \
-  --env-file /path/to/opencode-bridge.env \
+  --restart unless-stopped \
+  --env-file "$HOME/.config/opencode-messaging-bridge/env" \
   -e OPENCODE_BRIDGE_OPENCODE_WORKDIR="/workspace/project" \
   -v "$HOME/.local/share/opencode:/home/node/.local/share/opencode" \
   -v "$HOME/.config/opencode:/home/node/.config/opencode:ro" \
-  -v "/path/to/project:/workspace/project" \
+  -v "/home/kieran/dev/lifeos-scrubbed:/workspace/project" \
   -v opencode-bridge-state:/state \
   opencode-messaging-bridge
 ```
 
-`/path/to/opencode-bridge.env` should contain bridge-only runtime settings, for example:
+Replace `/home/kieran/dev/lifeos-scrubbed` with the repo you want OpenCode to control. The path inside the container must
+match `OPENCODE_BRIDGE_OPENCODE_WORKDIR`.
+
+Check the logs:
 
 ```bash
-OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=...
-OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS=12345
-OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS=12345
-OPENCODE_BRIDGE_MANAGE_OPENCODE=1
+docker logs -f opencode-bridge
 ```
+
+The bridge state lives in the `opencode-bridge-state` Docker volume because the image sets `XDG_STATE_HOME=/state`.
+That state stores Telegram offsets and chat-to-session bindings. It must not contain bot tokens or OpenCode credentials.
 
 OpenCode provider credentials are separate. OpenCode stores credentials created through `/connect` in
 `~/.local/share/opencode/auth.json`, so ChatGPT Plus/Pro and OpenCode Go credentials should be prepared on the host and
@@ -131,3 +169,43 @@ mounted into the container at runtime. OAuth-style credentials may need write ac
 the container writing to your host auth directory, copy the OpenCode auth directory into a private Docker volume and mount
 that instead. The same rule applies to OpenCode config under `~/.config/opencode`: mount it at runtime, do not copy it
 into the image, and do not commit generated auth files.
+
+### Telegram smoke test
+
+Send these messages to the allowlisted Telegram chat:
+
+```text
+/oc status
+/oc new Docker bridge smoke test
+/oc prompt what repository are you running in?
+/oc abort
+```
+
+Expected result:
+
+- `/oc status` reports OpenCode health and the active session.
+- `/oc new` creates and binds a session to that Telegram chat.
+- `/oc prompt` sends text to the bound OpenCode session.
+- Assistant text is relayed back into Telegram from the OpenCode event stream.
+
+### Docker config symlink gotcha
+
+The normal `llmfiles` install uses symlinks from `~/.config/opencode` back into this repo. Docker only sees symlink targets
+that are also mounted into the container. If OpenCode fails to load agents, commands, or skills from broken symlinks, use
+one of these fixes:
+
+- Mount the repo at the same absolute path inside the container, for example
+  `-v "/home/kieran/dev/llmfiles:/home/kieran/dev/llmfiles:ro"`.
+- Build a resolved Docker-only config directory and mount that to `/home/node/.config/opencode:ro` instead.
+
+The first option is quickest for a private server. The second option is cleaner if this becomes a repeatable deployment.
+
+### Stop or restart
+
+```bash
+docker restart opencode-bridge
+docker rm -f opencode-bridge
+```
+
+Do not publish `4096` from the container unless the bridge gains OpenCode basic-auth client support. For now, keep
+OpenCode on `127.0.0.1` inside the container and let Telegram be the only remote control surface.
