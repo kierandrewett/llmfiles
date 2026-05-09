@@ -7,7 +7,13 @@ import { afterEach, describe, it } from "node:test";
 import { createDefaultBridgeState, writeBridgeState } from "../src/state.js";
 import { TelegramEventRelay } from "../src/telegram-event-relay.js";
 import type { OpenCodeEvent } from "../src/opencode.js";
-import { TELEGRAM_MARKDOWN_PARSE_MODE, type SendMessageInput } from "../src/telegram.js";
+import {
+    TELEGRAM_MARKDOWN_PARSE_MODE,
+    type EditMessageTextInput,
+    type SendMessageDraftInput,
+    type SendMessageInput,
+    type TelegramSentMessage,
+} from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 
@@ -24,9 +30,8 @@ describe("TelegramEventRelay", () => {
         await relay.handleEvent(textEvent("ses_abc", "part_1", "hello world"));
         await relay.flushAll();
 
-        assert.deepEqual(fixture.telegram.sent, [
-            { chatID: "456", threadID: null, text: "hello world", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
-        ]);
+        assert.deepEqual(fixture.telegram.drafts.map((draft) => draft.text), ["hello world"]);
+        assert.deepEqual(fixture.telegram.sent, []);
     });
 
     it("ignores text events for unbound sessions", async () => {
@@ -46,6 +51,7 @@ describe("TelegramEventRelay", () => {
         await relay.handleEvent(textEvent("ses_abc", "part_1", "hello"));
         await relay.handleEvent({ type: "session.idle", properties: { sessionID: "ses_abc" } });
 
+        assert.deepEqual(fixture.telegram.drafts, []);
         assert.deepEqual(fixture.telegram.sent, [
             { chatID: "456", threadID: null, text: "hello", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
         ]);
@@ -58,15 +64,67 @@ describe("TelegramEventRelay", () => {
         await relay.handleEvent(textEvent("ses_abc", "part_1", "[bridge] value_1: a+b."));
         await relay.flushAll();
 
-        assert.deepEqual(fixture.telegram.sent, [
-            { chatID: "456", threadID: null, text: "\\[bridge\\] value\\_1: a\\+b\\.", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
+        assert.deepEqual(fixture.telegram.drafts, [
+            {
+                chatID: "456",
+                threadID: null,
+                draftID: fixture.telegram.drafts[0]?.draftID,
+                text: "\\[bridge\\] value\\_1: a\\+b\\.",
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            },
         ]);
+    });
+
+    it("streams private chat drafts before sending the final persisted message", async () => {
+        const fixture = await createFixture({ chatType: "private" });
+        const relay = new TelegramEventRelay(fixture.dependencies);
+
+        await relay.handleEvent(textEvent("ses_abc", "part_1", "hello"));
+        await relay.flushAll();
+        await relay.handleEvent(textEvent("ses_abc", "part_1", "hello world"));
+        await relay.flushAll();
+        await relay.handleEvent({ type: "session.idle", properties: { sessionID: "ses_abc" } });
+
+        assert.equal(fixture.telegram.drafts.length, 2);
+        assert.equal(fixture.telegram.drafts[0]?.draftID, fixture.telegram.drafts[1]?.draftID);
+        assert.notEqual(fixture.telegram.drafts[0]?.draftID, 0);
+        assert.deepEqual(fixture.telegram.drafts.map((draft) => draft.text), ["hello", "hello world"]);
+        assert.deepEqual(fixture.telegram.sent, [
+            { chatID: "456", threadID: null, text: "hello world", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
+        ]);
+        assert.deepEqual(fixture.telegram.edits, []);
+    });
+
+    it("uses editable messages as the streaming fallback outside private chats", async () => {
+        const fixture = await createFixture({ chatType: "supergroup" });
+        const relay = new TelegramEventRelay(fixture.dependencies);
+
+        await relay.handleEvent(textEvent("ses_abc", "part_1", "hello"));
+        await relay.flushAll();
+        await relay.handleEvent(textEvent("ses_abc", "part_1", "hello world"));
+        await relay.handleEvent({ type: "session.idle", properties: { sessionID: "ses_abc" } });
+
+        assert.deepEqual(fixture.telegram.sent, [
+            { chatID: "456", threadID: null, text: "hello", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
+        ]);
+        assert.deepEqual(fixture.telegram.edits, [
+            { chatID: "456", messageID: 100, text: "hello world", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
+        ]);
+        assert.deepEqual(fixture.telegram.drafts, []);
     });
 });
 
-async function createFixture(): Promise<{
+interface FixtureOptions {
+    chatType?: "private" | "group" | "supergroup" | "channel";
+}
+
+async function createFixture(options: FixtureOptions = {}): Promise<{
     dependencies: ConstructorParameters<typeof TelegramEventRelay>[0];
-    telegram: { sent: SendMessageInput[] };
+    telegram: {
+        drafts: SendMessageDraftInput[];
+        edits: EditMessageTextInput[];
+        sent: SendMessageInput[];
+    };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-event-relay-test-"));
     tempDirs.push(dir);
@@ -75,7 +133,7 @@ async function createFixture(): Promise<{
     state.bindings.push({
         id: "telegram:456::ses_abc",
         platform: "telegram",
-        surface: { chatID: "456", threadID: null },
+        surface: { chatID: "456", threadID: null, chatType: options.chatType ?? "private" },
         sessionID: "ses_abc",
         directory: null,
         title: "Example",
@@ -85,9 +143,18 @@ async function createFixture(): Promise<{
     await writeBridgeState(statePath, state);
 
     const telegram = {
+        drafts: [] as SendMessageDraftInput[],
+        edits: [] as EditMessageTextInput[],
         sent: [] as SendMessageInput[],
-        async sendMessage(input: SendMessageInput): Promise<void> {
+        async sendMessageDraft(input: SendMessageDraftInput): Promise<void> {
+            telegram.drafts.push(input);
+        },
+        async editMessageText(input: EditMessageTextInput): Promise<void> {
+            telegram.edits.push(input);
+        },
+        async sendMessage(input: SendMessageInput): Promise<TelegramSentMessage> {
             telegram.sent.push(input);
+            return { messageID: 100 + telegram.sent.length - 1 };
         },
     };
 

@@ -56,6 +56,7 @@ describe("TelegramBotApiClient", () => {
                     threadID: "42",
                     userID: "1234567890123",
                     chatID: "-1009876543210",
+                    chatType: "supergroup",
                     text: "/oc status",
                 },
             },
@@ -65,7 +66,12 @@ describe("TelegramBotApiClient", () => {
     it("sends text messages with optional thread IDs", async () => {
         const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
 
-        await client.sendMessage({ chatID: "123", threadID: "42", text: "*hello*", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE });
+        const sent = await client.sendMessage({
+            chatID: "123",
+            threadID: "42",
+            text: "*hello*",
+            parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+        });
 
         assert.equal(requests[0]?.method, "sendMessage");
         assert.deepEqual(requests[0]?.body, {
@@ -75,6 +81,49 @@ describe("TelegramBotApiClient", () => {
             parse_mode: "MarkdownV2",
             link_preview_options: { is_disabled: true },
         });
+        assert.deepEqual(sent, { messageID: 10 });
+    });
+
+    it("streams private chat drafts", async () => {
+        const { client, requests } = createClient([{ ok: true, result: true }]);
+
+        await client.sendMessageDraft({
+            chatID: "123",
+            threadID: "42",
+            draftID: 99,
+            text: "streaming",
+            parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+        });
+
+        assert.equal(requests[0]?.method, "sendMessageDraft");
+        assert.deepEqual(requests[0]?.body, {
+            chat_id: 123,
+            message_thread_id: 42,
+            draft_id: 99,
+            text: "streaming",
+            parse_mode: "MarkdownV2",
+        });
+    });
+
+    it("edits bot messages with MarkdownV2 formatting", async () => {
+        const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
+
+        const edited = await client.editMessageText({
+            chatID: "123",
+            messageID: 10,
+            text: "updated",
+            parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+        });
+
+        assert.equal(requests[0]?.method, "editMessageText");
+        assert.deepEqual(requests[0]?.body, {
+            chat_id: "123",
+            message_id: 10,
+            text: "updated",
+            parse_mode: "MarkdownV2",
+            link_preview_options: { is_disabled: true },
+        });
+        assert.deepEqual(edited, { messageID: 10 });
     });
 
     it("registers the Telegram command menu", async () => {
