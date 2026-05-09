@@ -9,6 +9,8 @@ import type { OpenCodeHealth, OpenCodeSession } from "../src/opencode.js";
 
 const TELEGRAM_DISABLED_ERROR = "[bridge] Telegram bridge is not enabled. "
     + "Set OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN and OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS.";
+const DISCORD_DISABLED_ERROR = "[bridge] Discord bridge is not enabled. "
+    + "Set OPENCODE_BRIDGE_DISCORD_BOT_TOKEN, OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID, and OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS.";
 const tempDirs: string[] = [];
 
 afterEach(async () => {
@@ -122,6 +124,36 @@ describe("runCli", () => {
         assert.equal(telegramPoller.calls, 0);
         assert.deepEqual(output.errors, [TELEGRAM_DISABLED_ERROR]);
     });
+
+    it("runs one Discord Gateway cycle when Discord is configured", async () => {
+        const { env, output, discordGateway } = await createFixture({ discordProcessed: 3 });
+
+        env.OPENCODE_BRIDGE_DISCORD_BOT_TOKEN = "discord-token";
+        env.OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS = "123";
+        env.OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID = "456";
+
+        const exitCode = await runCli(
+            ["discord-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, discordGateway },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.equal(discordGateway.calls, 1);
+        assert.deepEqual(output.lines, ["[bridge] discord processed 3 gateway dispatch event(s)"]);
+    });
+
+    it("refuses Discord Gateway when Discord is not configured", async () => {
+        const { env, output, discordGateway } = await createFixture();
+
+        const exitCode = await runCli(
+            ["discord-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, discordGateway },
+        );
+
+        assert.equal(exitCode, 1);
+        assert.equal(discordGateway.calls, 0);
+        assert.deepEqual(output.errors, [DISCORD_DISABLED_ERROR]);
+    });
 });
 
 interface FixtureOptions {
@@ -129,6 +161,7 @@ interface FixtureOptions {
     sessions?: OpenCodeSession[];
     createdSession?: OpenCodeSession;
     telegramProcessed?: number;
+    discordProcessed?: number;
 }
 
 interface FixtureClient {
@@ -147,6 +180,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     };
     client: FixtureClient;
     telegramPoller: { calls: number; runOnce(): Promise<number> };
+    discordGateway: { calls: number; runOnce(): Promise<number> };
     processManager: { calls: string[]; start(): Promise<string>; stop(): Promise<void> };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bridge-cli-test-"));
@@ -184,6 +218,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             async runOnce(): Promise<number> {
                 this.calls += 1;
                 return options.telegramProcessed ?? 0;
+            },
+        },
+        discordGateway: {
+            calls: 0,
+            async runOnce(): Promise<number> {
+                this.calls += 1;
+                return options.discordProcessed ?? 0;
             },
         },
         processManager: {
