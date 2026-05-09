@@ -33,7 +33,7 @@ export interface TelegramRouterOpenCodeClient {
 }
 
 export interface TelegramRouterTelegramClient {
-    sendMessage(input: SendMessageInput): Promise<void>;
+    sendMessage(input: SendMessageInput): Promise<unknown>;
     sendChatAction(input: SendChatActionInput): Promise<void>;
     setMessageReaction(input: SetMessageReactionInput): Promise<void>;
 }
@@ -298,10 +298,16 @@ function surfaceID(message: TelegramMessage): string {
 }
 
 function surfaceAddress(message: TelegramMessage): BridgeSurfaceAddress {
-    return {
+    const address: BridgeSurfaceAddress = {
         chatID: message.chatID,
         threadID: message.threadID,
     };
+
+    if (message.chatType) {
+        address.chatType = message.chatType;
+    }
+
+    return address;
 }
 
 function findSurface(state: BridgeState, id: string): BridgeSurfaceState | undefined {

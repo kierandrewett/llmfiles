@@ -22,6 +22,7 @@ export interface TelegramMessage {
     threadID: string | null;
     userID: string | null;
     chatID: string;
+    chatType?: string;
     text: string | null;
 }
 
@@ -34,6 +35,25 @@ export interface GetUpdatesOptions {
 export interface SendMessageInput {
     chatID: string;
     threadID: string | null;
+    text: string;
+    parseMode?: typeof TELEGRAM_MARKDOWN_PARSE_MODE;
+}
+
+export interface TelegramSentMessage {
+    messageID: number;
+}
+
+export interface SendMessageDraftInput {
+    chatID: string;
+    threadID: string | null;
+    draftID: number;
+    text: string;
+    parseMode?: typeof TELEGRAM_MARKDOWN_PARSE_MODE;
+}
+
+export interface EditMessageTextInput {
+    chatID: string;
+    messageID: number;
     text: string;
     parseMode?: typeof TELEGRAM_MARKDOWN_PARSE_MODE;
 }
@@ -105,8 +125,22 @@ export class TelegramBotApiClient {
         return result.map((entry, index) => parseUpdate(entry, `Telegram getUpdates result[${index}]`));
     }
 
-    async sendMessage(input: SendMessageInput): Promise<void> {
-        await this.request("sendMessage", telegramMessageBody(input));
+    async sendMessage(input: SendMessageInput): Promise<TelegramSentMessage> {
+        const result = await this.request("sendMessage", telegramMessageBody(input));
+        return parseSentMessage(result, "Telegram sendMessage result");
+    }
+
+    async sendMessageDraft(input: SendMessageDraftInput): Promise<void> {
+        await this.request("sendMessageDraft", telegramMessageDraftBody(input));
+    }
+
+    async editMessageText(input: EditMessageTextInput): Promise<TelegramSentMessage | true> {
+        const result = await this.request("editMessageText", telegramEditMessageTextBody(input));
+        if (result === true) {
+            return true;
+        }
+
+        return parseSentMessage(result, "Telegram editMessageText result");
     }
 
     async setMyCommands(input: SetMyCommandsInput): Promise<void> {
@@ -175,6 +209,38 @@ export function telegramMessageBody(input: SendMessageInput): Record<string, unk
     return body;
 }
 
+export function telegramMessageDraftBody(input: SendMessageDraftInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        chat_id: telegramInteger(input.chatID, "chatID"),
+        draft_id: input.draftID,
+        text: input.text,
+    };
+
+    if (input.threadID !== null) {
+        body.message_thread_id = Number(input.threadID);
+    }
+    if (input.parseMode) {
+        body.parse_mode = input.parseMode;
+    }
+
+    return body;
+}
+
+export function telegramEditMessageTextBody(input: EditMessageTextInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        chat_id: input.chatID,
+        message_id: input.messageID,
+        text: input.text,
+        link_preview_options: { is_disabled: true },
+    };
+
+    if (input.parseMode) {
+        body.parse_mode = input.parseMode;
+    }
+
+    return body;
+}
+
 export function telegramCommandsBody(input: SetMyCommandsInput): Record<string, unknown> {
     return { commands: input.commands };
 }
@@ -219,13 +285,28 @@ function parseMessage(value: unknown, source: string): TelegramMessage {
     const record = requireRecord(value, source);
     const chat = requireRecord(record.chat, `${source}.chat`);
     const from = record.from === undefined ? null : requireRecord(record.from, `${source}.from`);
+    const chatType = record.chat === undefined ? undefined : readOptionalString(chat.type, `${source}.chat.type`);
 
-    return {
+    const message: TelegramMessage = {
         messageID: requireNumber(record.message_id, `${source}.message_id`),
         threadID: record.message_thread_id === undefined ? null : String(requireNumber(record.message_thread_id, `${source}.message_thread_id`)),
         userID: from === null ? null : String(requireNumber(from.id, `${source}.from.id`)),
         chatID: String(requireNumber(chat.id, `${source}.chat.id`)),
         text: record.text === undefined ? null : requireString(record.text, `${source}.text`),
+    };
+
+    if (chatType) {
+        message.chatType = chatType;
+    }
+
+    return message;
+}
+
+function parseSentMessage(value: unknown, source: string): TelegramSentMessage {
+    const record = requireRecord(value, source);
+
+    return {
+        messageID: requireNumber(record.message_id, `${source}.message_id`),
     };
 }
 
@@ -269,6 +350,23 @@ function requireString(value: unknown, source: string): string {
     }
 
     return value;
+}
+
+function readOptionalString(value: unknown, source: string): string | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+
+    return requireString(value, source);
+}
+
+function telegramInteger(value: string, source: string): number {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) {
+        throw new Error(`Telegram ${source} must be a safe integer string`);
+    }
+
+    return parsed;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

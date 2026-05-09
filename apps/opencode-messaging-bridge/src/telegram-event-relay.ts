@@ -4,13 +4,19 @@ import {
     TELEGRAM_MARKDOWN_PARSE_MODE,
     chunkTelegramText,
     escapeTelegramMarkdown,
+    type EditMessageTextInput,
+    type SendMessageDraftInput,
     type SendMessageInput,
+    type TelegramSentMessage,
 } from "./telegram.js";
 
 const DEFAULT_FLUSH_DELAY_MS = 1200;
+const TELEGRAM_PREVIEW_LIMIT = 4096;
 
 export interface TelegramEventRelayTelegramClient {
-    sendMessage(input: SendMessageInput): Promise<void>;
+    sendMessage(input: SendMessageInput): Promise<TelegramSentMessage>;
+    sendMessageDraft(input: SendMessageDraftInput): Promise<void>;
+    editMessageText(input: EditMessageTextInput): Promise<unknown>;
 }
 
 export interface TelegramEventRelayDependencies {
@@ -21,15 +27,17 @@ export interface TelegramEventRelayDependencies {
     clearTimer?: (timer: NodeJS.Timeout) => void;
 }
 
-interface TextProgress {
-    length: number;
-}
-
 interface StreamBuffer {
     sessionID: string;
     partID: string;
     text: string;
     timer: NodeJS.Timeout | null;
+}
+
+interface TelegramDeliveryPreview {
+    draftID: number;
+    messageID: number | null;
+    text: string;
 }
 
 export class TelegramEventRelay {
@@ -38,8 +46,8 @@ export class TelegramEventRelay {
     private readonly flushDelayMs: number;
     private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
     private readonly clearTimer: (timer: NodeJS.Timeout) => void;
-    private readonly progress = new Map<string, TextProgress>();
     private readonly buffers = new Map<string, StreamBuffer>();
+    private readonly previews = new Map<string, TelegramDeliveryPreview>();
 
     constructor(dependencies: TelegramEventRelayDependencies) {
         this.statePath = dependencies.statePath;
@@ -64,7 +72,7 @@ export class TelegramEventRelay {
     async flushAll(): Promise<void> {
         const keys = [...this.buffers.keys()];
         for (const key of keys) {
-            await this.flushBuffer(key);
+            await this.flushPreview(key);
         }
     }
 
@@ -80,43 +88,40 @@ export class TelegramEventRelay {
             return;
         }
 
-        this.bufferText(sessionID, partID, this.textDelta(sessionID, partID, part, event.properties));
+        this.bufferText(sessionID, partID, this.nextText(sessionID, partID, part, event.properties));
     }
 
-    private textDelta(
+    private nextText(
         sessionID: string,
         partID: string,
         part: Record<string, unknown>,
         properties: Record<string, unknown>,
-    ): string {
+    ): string | null {
         const key = `${sessionID}:${partID}:text`;
         const currentText = readString(part.text) ?? "";
         const explicitDelta = readString(properties.delta);
+        const previousText = this.buffers.get(key)?.text ?? "";
+        if (currentText.length > previousText.length) {
+            return currentText;
+        }
         if (explicitDelta !== null) {
-            this.progress.set(key, { length: currentText.length });
-            return explicitDelta;
+            return `${previousText}${explicitDelta}`;
         }
 
-        const previousLength = this.progress.get(key)?.length ?? 0;
-        this.progress.set(key, { length: currentText.length });
-        if (currentText.length <= previousLength) {
-            return "";
-        }
-
-        return currentText.slice(previousLength);
+        return null;
     }
 
-    private bufferText(sessionID: string, partID: string, delta: string): void {
-        if (!delta) {
+    private bufferText(sessionID: string, partID: string, text: string | null): void {
+        if (text === null || text.length === 0) {
             return;
         }
 
         const key = `${sessionID}:${partID}:text`;
         const buffer = this.buffers.get(key) ?? { sessionID, partID, text: "", timer: null };
-        buffer.text += delta;
+        buffer.text = text;
         if (!buffer.timer) {
             buffer.timer = this.setTimer(() => {
-                void this.flushBuffer(key);
+                void this.flushPreview(key);
             }, this.flushDelayMs);
         }
         this.buffers.set(key, buffer);
@@ -131,19 +136,19 @@ export class TelegramEventRelay {
             .filter(([, buffer]) => buffer.sessionID === sessionID)
             .map(([key]) => key);
         for (const key of keys) {
-            await this.flushBuffer(key);
+            await this.finaliseBuffer(key);
         }
     }
 
-    private async flushBuffer(key: string): Promise<void> {
+    private async flushPreview(key: string): Promise<void> {
         const buffer = this.buffers.get(key);
         if (!buffer) {
             return;
         }
 
-        this.buffers.delete(key);
         if (buffer.timer) {
             this.clearTimer(buffer.timer);
+            buffer.timer = null;
         }
 
         const text = buffer.text;
@@ -152,7 +157,29 @@ export class TelegramEventRelay {
         }
 
         for (const binding of await this.telegramBindings(buffer.sessionID)) {
-            await this.send(binding, text);
+            await this.updatePreview(key, binding, text);
+        }
+    }
+
+    private async finaliseBuffer(key: string): Promise<void> {
+        const buffer = this.buffers.get(key);
+        if (!buffer) {
+            return;
+        }
+
+        if (buffer.timer) {
+            this.clearTimer(buffer.timer);
+        }
+
+        this.buffers.delete(key);
+        const text = buffer.text;
+        if (!text.trim()) {
+            return;
+        }
+
+        const bindings = await this.telegramBindings(buffer.sessionID);
+        for (const binding of bindings) {
+            await this.finaliseDelivery(key, binding, text);
         }
     }
 
@@ -161,20 +188,131 @@ export class TelegramEventRelay {
         return state.bindings.filter((binding) => binding.platform === "telegram" && binding.sessionID === sessionID);
     }
 
-    private async send(binding: BridgeBindingState, text: string): Promise<void> {
+    private async updatePreview(key: string, binding: BridgeBindingState, text: string): Promise<void> {
         if (!binding.surface.chatID) {
             return;
         }
 
-        for (const chunk of chunkTelegramText(text)) {
+        const escapedText = previewText(text);
+        const deliveryKey = deliveryKeyForBinding(key, binding);
+        const preview = this.previews.get(deliveryKey) ?? {
+            draftID: draftIDForDelivery(deliveryKey),
+            messageID: null,
+            text: "",
+        };
+        if (preview.text === escapedText) {
+            return;
+        }
+
+        if (binding.surface.chatType === "private") {
+            await this.telegram.sendMessageDraft({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                draftID: preview.draftID,
+                text: escapedText,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+            preview.text = escapedText;
+            this.previews.set(deliveryKey, preview);
+            return;
+        }
+
+        if (preview.messageID === null) {
+            const sent = await this.telegram.sendMessage({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                text: escapedText,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+            preview.messageID = sent.messageID;
+            preview.text = escapedText;
+            this.previews.set(deliveryKey, preview);
+            return;
+        }
+
+        await this.telegram.editMessageText({
+            chatID: binding.surface.chatID,
+            messageID: preview.messageID,
+            text: escapedText,
+            parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+        });
+        preview.text = escapedText;
+        this.previews.set(deliveryKey, preview);
+    }
+
+    private async finaliseDelivery(key: string, binding: BridgeBindingState, text: string): Promise<void> {
+        if (!binding.surface.chatID) {
+            return;
+        }
+
+        const deliveryKey = deliveryKeyForBinding(key, binding);
+        const preview = this.previews.get(deliveryKey);
+        const chunks = chunkTelegramText(text).map(escapeTelegramMarkdown);
+        if (binding.surface.chatType === "private") {
+            for (const chunk of chunks) {
+                await this.telegram.sendMessage({
+                    chatID: binding.surface.chatID,
+                    threadID: binding.surface.threadID,
+                    text: chunk,
+                    parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+                });
+            }
+            this.previews.delete(deliveryKey);
+            return;
+        }
+
+        const [firstChunk, ...remainingChunks] = chunks;
+        if (!firstChunk) {
+            return;
+        }
+
+        if (preview?.messageID !== null && preview?.messageID !== undefined) {
+            if (preview.text !== firstChunk) {
+                await this.telegram.editMessageText({
+                    chatID: binding.surface.chatID,
+                    messageID: preview.messageID,
+                    text: firstChunk,
+                    parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+                });
+            }
+        } else {
             await this.telegram.sendMessage({
                 chatID: binding.surface.chatID,
                 threadID: binding.surface.threadID,
-                text: escapeTelegramMarkdown(chunk),
+                text: firstChunk,
                 parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
             });
         }
+
+        for (const chunk of remainingChunks) {
+            await this.telegram.sendMessage({
+                chatID: binding.surface.chatID,
+                threadID: binding.surface.threadID,
+                text: chunk,
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+            });
+        }
+
+        this.previews.delete(deliveryKey);
     }
+}
+
+function previewText(text: string): string {
+    return escapeTelegramMarkdown(chunkTelegramText(text, TELEGRAM_PREVIEW_LIMIT)[0] ?? "");
+}
+
+function deliveryKeyForBinding(streamKey: string, binding: BridgeBindingState): string {
+    return `${streamKey}:${binding.surface.chatID ?? ""}:${binding.surface.threadID ?? ""}`;
+}
+
+function draftIDForDelivery(key: string): number {
+    let hash = 2166136261;
+    for (let index = 0; index < key.length; index += 1) {
+        hash ^= key.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+
+    return (hash >>> 0) % 2147483647 || 1;
 }
 
 function sessionIDFromEvent(event: OpenCodeEvent): string | null {

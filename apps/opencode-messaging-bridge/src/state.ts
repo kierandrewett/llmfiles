@@ -6,6 +6,7 @@ export type BridgePlatform = "telegram" | "discord";
 export interface BridgeSurfaceAddress {
     chatID?: string;
     channelID?: string;
+    chatType?: string;
     threadID: string | null;
     messageID?: string | null;
 }
@@ -164,6 +165,7 @@ function parseSurfaceAddress(value: unknown, source: string): BridgeSurfaceAddre
     const record = requireRecord(value, source);
     const chatID = readOptionalString(record.chatID, `${source}.chatID`);
     const channelID = readOptionalString(record.channelID, `${source}.channelID`);
+    const chatType = readOptionalString(record.chatType, `${source}.chatType`);
 
     if (!chatID && !channelID) {
         throw new Error(`${source} must include chatID or channelID`);
@@ -179,6 +181,9 @@ function parseSurfaceAddress(value: unknown, source: string): BridgeSurfaceAddre
     }
     if (channelID) {
         address.channelID = channelID;
+    }
+    if (chatType) {
+        address.chatType = chatType;
     }
     if (messageID !== undefined) {
         address.messageID = messageID;
