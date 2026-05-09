@@ -18,6 +18,30 @@ opencode-plugin-check:
 	@yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" exec tsc --noEmit -p "{{repo}}/tests/opencode/tsconfig.json"
 	@yarn --cwd "{{repo}}/apps/opencode-messaging-bridge" exec tsx "{{repo}}/tests/opencode/discord-remote-control-smoke.ts"
 
+# Build a Docker-safe OpenCode config directory with symlinks resolved.
+opencode-bridge-config target="" source="":
+	@target="{{target}}"; source="{{source}}"; \
+		target="${target:-$HOME/.config/opencode-messaging-bridge/opencode-config}"; \
+		source="${source:-$HOME/.config/opencode}"; \
+		if [ ! -d "$source" ]; then \
+			printf '[llmfiles] missing OpenCode config source %s\n' "$source"; \
+			exit 1; \
+		fi; \
+		source="$(realpath -m "$source")"; \
+		target="$(realpath -m "$target")"; \
+		case "$target" in ""|"/"|"$HOME"|"$source"|"$source"/*) \
+			printf '[llmfiles] refusing unsafe target %s\n' "$target"; \
+			exit 1; \
+			;; \
+		esac; \
+		parent="$(dirname "$target")"; \
+		mkdir -p "$parent"; \
+		tmp="$(mktemp -d "$parent/.opencode-config.XXXXXX")"; \
+		cp -aL "$source"/. "$tmp"/; \
+		rm -rf "$target"; \
+		mv "$tmp" "$target"; \
+		printf '[llmfiles] wrote resolved OpenCode config to %s\n' "$target"
+
 # Link a source path to a destination. Existing real files are skipped.
 _link src dst:
     @src="{{src}}"; dst="{{dst}}"; \

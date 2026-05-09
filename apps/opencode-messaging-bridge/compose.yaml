@@ -6,10 +6,6 @@ services:
         OPENCODE_VERSION: ${OPENCODE_VERSION:-}
     image: ${OPENCODE_BRIDGE_IMAGE:-opencode-messaging-bridge:local}
     container_name: ${OPENCODE_BRIDGE_CONTAINER_NAME:-opencode-bridge}
-    # Command examples for .env:
-    #   OPENCODE_BRIDGE_COMMAND=telegram          # Telegram only; keep Telegram env keys in the runtime env file.
-    #   OPENCODE_BRIDGE_COMMAND=discord           # Discord only; keep Discord env keys in the runtime env file.
-    #   OPENCODE_BRIDGE_COMMAND=telegram+discord  # Both surfaces; keep both env key blocks in the runtime env file.
     command: ["yarn", "start", "${OPENCODE_BRIDGE_COMMAND:-telegram}"]
     init: true
     restart: unless-stopped
@@ -22,23 +18,10 @@ services:
       OPENCODE_BRIDGE_OPENCODE_WORKDIR: "/workspace/project"
       XDG_STATE_HOME: "/state"
     volumes:
-      - type: bind
-        source: ${OPENCODE_BRIDGE_AUTH_DIR:?Set OPENCODE_BRIDGE_AUTH_DIR in .env}
-        target: /home/node/.local/share/opencode
-      - type: bind
-        source: ${OPENCODE_BRIDGE_CONFIG_DIR:?Set OPENCODE_BRIDGE_CONFIG_DIR in .env}
-        target: /home/node/.config/opencode
-        read_only: true
-      - type: bind
-        source: ${OPENCODE_BRIDGE_PROJECT_DIR:?Set OPENCODE_BRIDGE_PROJECT_DIR in .env}
-        target: /workspace/project
-      - type: bind
-        source: ${OPENCODE_BRIDGE_LLMFILES_DIR:?Set OPENCODE_BRIDGE_LLMFILES_DIR in .env}
-        target: /home/kieran/dev/llmfiles
-        read_only: true
-      - type: volume
-        source: opencode-bridge-state
-        target: /state
+      - "${OPENCODE_BRIDGE_AUTH_DIR:?Set OPENCODE_BRIDGE_AUTH_DIR in .env}:/home/node/.local/share/opencode"
+      - "${OPENCODE_BRIDGE_CONFIG_DIR:?Set OPENCODE_BRIDGE_CONFIG_DIR in .env}:/home/node/.config/opencode:ro"
+      - "${OPENCODE_BRIDGE_PROJECT_DIR:?Set OPENCODE_BRIDGE_PROJECT_DIR in .env}:/workspace/project"
+      - "opencode-bridge-state:/state"
     healthcheck:
       test:
         - CMD-SHELL

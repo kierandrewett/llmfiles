@@ -27,6 +27,7 @@ just install-claude-skills                    # ~/.claude/skills
 
 just opencode-bridge status                   # check the standalone OpenCode bridge
 just opencode-bridge-check                    # typecheck and test the bridge app
+just opencode-bridge-config                   # build resolved OpenCode config for Docker
 just opencode-plugin-check                    # typecheck and smoke-test OpenCode plugins
 
 just install-opencode /tmp/opencode           # custom target
@@ -78,9 +79,9 @@ Start with the package README for the full setup, env files, Docker mounts, and 
 apps/opencode-messaging-bridge/README.md
 ```
 
-The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth/config and the target repo at
-runtime, and stores Telegram offsets, Discord Gateway resume state, slash-command registration signatures, and session
-bindings in a Docker volume.
+The Docker path keeps `opencode serve` on loopback inside the container, mounts OpenCode auth, a resolved OpenCode config
+directory, and the target repo at runtime, and stores Telegram offsets, Discord Gateway resume state, slash-command
+registration signatures, and session bindings in a Docker volume. It does not need to mount this repo.
 
 ## Sync notes
 

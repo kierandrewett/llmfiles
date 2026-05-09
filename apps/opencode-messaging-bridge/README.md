@@ -79,9 +79,10 @@ export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
 just opencode-bridge discord
 ```
 
-For Docker Compose, copy and edit the example files from this package directory:
+For Docker Compose, build the resolved OpenCode config, then copy and edit the example files from this package directory:
 
 ```bash
+just opencode-bridge-config
 cp .env.example .env
 mkdir -p "$HOME/.config/opencode-messaging-bridge"
 cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
@@ -357,6 +358,13 @@ docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge
 
 Docker Compose is the preferred server path for the Telegram or Discord bridge.
 
+Build a Docker-safe OpenCode config directory first. This copies your OpenCode config with symlinks resolved, so the
+container does not need a `llmfiles` mount:
+
+```bash
+just opencode-bridge-config
+```
+
 Copy the Compose interpolation example and edit the host paths:
 
 ```bash
@@ -385,6 +393,13 @@ OPENCODE_BRIDGE_COMMAND=telegram+discord
 In the runtime env file, remove the token block for any surface you are not running. Keep both token blocks when
 `OPENCODE_BRIDGE_COMMAND=telegram+discord`. The example shows both blocks so the available keys are visible, not because
 both are always required.
+
+For `bsociety`, set this in `.env`:
+
+```bash
+OPENCODE_BRIDGE_PROJECT_DIR=/home/kieran/dev/bsociety
+OPENCODE_BRIDGE_CONFIG_DIR=/home/kieran/.config/opencode-messaging-bridge/opencode-config
+```
 
 Check the Compose shape with the example env before using real tokens:
 
@@ -449,14 +464,14 @@ docker run -d \
   --env-file "$HOME/.config/opencode-messaging-bridge/env" \
   -e OPENCODE_BRIDGE_OPENCODE_WORKDIR="/workspace/project" \
   -v "$HOME/.local/share/opencode:/home/node/.local/share/opencode" \
-  -v "$HOME/.config/opencode:/home/node/.config/opencode:ro" \
-  -v "/home/kieran/dev/lifeos-scrubbed:/workspace/project" \
+  -v "$HOME/.config/opencode-messaging-bridge/opencode-config:/home/node/.config/opencode:ro" \
+  -v "/home/kieran/dev/bsociety:/workspace/project" \
   -v opencode-bridge-state:/state \
   opencode-messaging-bridge \
   yarn start discord
 ```
 
-Replace `/home/kieran/dev/lifeos-scrubbed` with the repo you want OpenCode to control. The path inside the container must
+Replace `/home/kieran/dev/bsociety` with the repo you want OpenCode to control. The path inside the container must
 match `OPENCODE_BRIDGE_OPENCODE_WORKDIR`.
 
 Check the logs:
@@ -473,20 +488,8 @@ OpenCode provider credentials are separate. OpenCode stores credentials created 
 `~/.local/share/opencode/auth.json`, so ChatGPT Plus/Pro and OpenCode Go credentials should be prepared on the host and
 mounted into the container at runtime. OAuth-style credentials may need write access for token refresh; if you do not want
 the container writing to your host auth directory, copy the OpenCode auth directory into a private Docker volume and mount
-that instead. The same rule applies to OpenCode config under `~/.config/opencode`: mount it at runtime, do not copy it
-into the image, and do not commit generated auth files.
-
-### Docker config symlink gotcha
-
-The normal `llmfiles` install uses symlinks from `~/.config/opencode` back into this repo. Docker only sees symlink targets
-that are also mounted into the container. If OpenCode fails to load agents, commands, or skills from broken symlinks, use
-one of these fixes:
-
-- Mount the repo at the same absolute path inside the container, for example
-  `-v "/home/kieran/dev/llmfiles:/home/kieran/dev/llmfiles:ro"`.
-- Build a resolved Docker-only config directory and mount that to `/home/node/.config/opencode:ro` instead.
-
-The first option is quickest for a private server. The second option is cleaner if this becomes a repeatable deployment.
+that instead. OpenCode config is separate: run `just opencode-bridge-config` after changing repo-managed agents, commands,
+skills, or plugins, then mount the resolved config directory read-only.
 
 ### Stop or restart
 
