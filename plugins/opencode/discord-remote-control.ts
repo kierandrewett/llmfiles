@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { Plugin } from "@opencode-ai/plugin";
 
@@ -9,8 +9,30 @@ const DISCORD_GATEWAY_VERSION = "10";
 const DEFAULT_PREFIX = "!oc";
 const DEFAULT_SLASH_COMMAND = "oc";
 const DEFAULT_INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
-const DEFAULT_IGNORED_SESSION_TITLE_RE = /Generate git commit message/i;
+const DEFAULT_IGNORED_SESSION_TITLE_RE = /Generate git commit message|Discord forum intake classifier/i;
 const DEFAULT_THREAD_AUTO_ARCHIVE_MINUTES = 1440;
+const DEFAULT_RUNTIME_TTL_MS = 90000;
+const DEFAULT_PRESENCE_UPDATE_MS = 30000;
+const DISCORD_RATE_LIMIT_MAX_RETRIES = 2;
+const DISCORD_RATE_LIMIT_MAX_WAIT_MS = 120000;
+const DISCORD_FORUM_TAG_LIMIT = 20;
+const DISCORD_FORUM_AVAILABLE_TAG_LIMIT = 20;
+const DISCORD_THREAD_APPLIED_TAG_LIMIT = 5;
+const CLASSIFIER_SESSION_TITLE = "Discord forum intake classifier";
+const INTAKE_CLASSIFIER_TOOLS: Record<string, boolean> = {
+    bash: false,
+    edit: false,
+    write: false,
+    apply_patch: false,
+    read: true,
+    grep: true,
+    glob: true,
+    list: true,
+    task: false,
+    todowrite: false,
+    webfetch: false,
+    skill: false,
+};
 const DISCORD_EPHEMERAL_FLAG = 1 << 6;
 const DISCORD_CHAT_INPUT_COMMAND = 1;
 const DISCORD_OPTION_SUBCOMMAND = 1;
@@ -21,11 +43,53 @@ const DISCORD_INTERACTION_APPLICATION_COMMAND = 2;
 const DISCORD_INTERACTION_CHANNEL_MESSAGE = 4;
 const DISCORD_PUBLIC_THREAD = 11;
 const DISCORD_PRIVATE_THREAD = 12;
+const DISCORD_GUILD_FORUM = 15;
+const DISCORD_GUILD_MEDIA = 16;
 const FATAL_GATEWAY_CLOSE_CODES = new Map([
     [4004, "authentication failed; check OPENCODE_DISCORD_BOT_TOKEN"],
     [4010, "invalid shard"],
     [4013, "invalid intents"],
     [4014, "disallowed intents; enable the Message Content intent or reduce requested intents"],
+]);
+const EMBED_COLOR = {
+    assistant: 0x5865f2,
+    thinking: 0x9b59b6,
+    tool: 0x3498db,
+    success: 0x2ecc71,
+    warning: 0xf1c40f,
+    error: 0xe74c3c,
+    info: 0x95a5a6,
+};
+const ICON = {
+    assistant: "\u{1F916}",
+    thinking: "\u{1F9E0}",
+    tool: "\u{1F527}",
+    success: "\u{2705}",
+    warning: "\u{26A0}\u{FE0F}",
+    error: "\u{274C}",
+    info: "\u{2139}\u{FE0F}",
+    idle: "\u{1F4A4}",
+    patch: "\u{1F4DD}",
+    agent: "\u{1F9D1}\u{200D}\u{1F4BB}",
+    permission: "\u{1F510}",
+    todo: "\u{1F4CB}",
+};
+const REACTION = {
+    step: "\u{1F501}",
+    done: "\u{2705}",
+    idle: "\u{1F4A4}",
+    status: "\u{2139}\u{FE0F}",
+    tool: "\u{1F527}",
+    failed: "\u{274C}",
+    todo: "\u{1F4CB}",
+};
+const IMPORTANT_TOOL_NAMES = new Set([
+    "apply_patch",
+    "bash",
+    "edit",
+    "task",
+    "webfetch",
+    "write",
 ]);
 
 type JsonObject = Record<string, unknown>;
@@ -33,6 +97,56 @@ type JsonObject = Record<string, unknown>;
 type LogLevel = "debug" | "info" | "warn" | "error";
 type PermissionReply = "once" | "always" | "reject";
 type ThreadType = "public" | "private";
+
+type ModelMetadata = {
+    providerID: string;
+    modelID: string;
+    variant: string | null;
+};
+
+type SessionMetadata = {
+    id: string;
+    title: string | null;
+    directory: string | null;
+    branch: string | null;
+    model: ModelMetadata | null;
+};
+
+type ForumThreadState = {
+    threadID: string;
+    name: string | null;
+    ownerID: string | null;
+    createdAt: number;
+};
+
+type ForumIntakePlan = {
+    title: string;
+    directory: string | null;
+    model: ModelMetadata | null;
+    prompt: string;
+};
+
+type PluginContext = {
+    client: unknown;
+    directory: string;
+};
+
+type PluginEventInput = {
+    event: unknown;
+};
+
+type ChatMessageHookInput = {
+    sessionID?: string | null;
+    model?: unknown;
+    variant?: unknown;
+};
+
+type ToolExecuteHookInput = {
+    sessionID?: string | null;
+    callID?: string | null;
+    tool?: string | null;
+    args?: unknown;
+};
 
 type SessionMethod = (input?: unknown) => Promise<unknown>;
 
@@ -46,13 +160,18 @@ type OpenCodeClientLike = {
     session?: {
         abort?: SessionMethod;
         create?: SessionMethod;
+        delete?: SessionMethod;
         get?: SessionMethod;
         list?: SessionMethod;
+        prompt?: SessionMethod;
         promptAsync?: SessionMethod;
         status?: SessionMethod;
     };
     permission?: {
         reply?: SessionMethod;
+    };
+    vcs?: {
+        get?: SessionMethod;
     };
     postSessionIdPermissionsPermissionId?: SessionMethod;
 };
@@ -78,6 +197,8 @@ type Config = {
     threadType: ThreadType;
     threadAutoArchiveMinutes: number;
     threadNamePrefix: string;
+    forumPostsEnabled: boolean;
+    forumTagsEnabled: boolean;
     statePath: string;
     initialSessionID: string | null;
     agent: string | null;
@@ -87,6 +208,9 @@ type Config = {
     sendDelayMs: number;
     reconnectBaseMs: number;
     reconnectMaxMs: number;
+    runtimeTtlMs: number;
+    presenceUpdateMs: number;
+    presenceEnabled: boolean;
     ignoredSessionTitleRe: RegExp;
 };
 
@@ -104,11 +228,36 @@ type DiscordUser = {
 };
 
 type DiscordMessage = {
+    id?: string | undefined;
+    channel_id?: string | undefined;
+    guild_id?: string | undefined;
+    content?: string | undefined;
+    author?: DiscordUser | undefined;
+    thread?: DiscordChannel | undefined;
+};
+
+type DiscordChannel = {
     id?: string;
-    channel_id?: string;
-    guild_id?: string;
-    content?: string;
-    author?: DiscordUser;
+    type?: number;
+    name?: string;
+    parent_id?: string | null;
+    owner_id?: string | null;
+    application_id?: string | null;
+    available_tags?: DiscordForumTag[];
+    applied_tags?: string[];
+};
+
+type DiscordForumTag = {
+    id?: string;
+    name: string;
+    moderated?: boolean;
+    emoji_id?: string | null;
+    emoji_name?: string | null;
+};
+
+type SessionMessageReference = {
+    channelID: string;
+    messageID: string;
 };
 
 type DiscordInteractionOption = {
@@ -138,18 +287,50 @@ type DiscordInteraction = {
 
 type CommandContext = {
     sourceChannelID?: string | null;
+    sourceMessageID?: string | null;
     sourceSessionID?: string | null;
+    silentAck?: boolean;
 };
 
 type DiscordTarget = {
-    channelID?: string | null;
-    sessionID?: string | null;
+    channelID?: string | null | undefined;
+    sessionID?: string | null | undefined;
+};
+
+type DiscordEmbed = {
+    title?: string;
+    description?: string;
+    color?: number;
+    timestamp?: string;
+    fields?: Array<{
+        name: string;
+        value: string;
+        inline?: boolean;
+    }>;
+    footer?: {
+        text: string;
+    };
+};
+
+type DiscordOutboundMessage = {
+    content?: string;
+    embeds?: DiscordEmbed[];
+};
+
+type RuntimeState = {
+    instanceID: string;
+    pid: number;
+    directory: string;
+    activeSessionID: string | null;
+    startedAt: number;
+    updatedAt: number;
 };
 
 type PersistentState = {
     version: 1;
     registrations: Record<string, string>;
     threads: Record<string, Record<string, string>>;
+    runtimes: Record<string, RuntimeState>;
 };
 
 type PendingPermission = {
@@ -231,17 +412,27 @@ function normalizeThreadArchiveMinutes(value: number): number {
     return allowed.includes(value) ? value : DEFAULT_THREAD_AUTO_ARCHIVE_MINUTES;
 }
 
-function safeThreadName(prefix: string, sessionID: string, title: string | null | undefined): string {
-    const suffix = (title || "session")
+function safeThreadNamePart(value: string | null | undefined, fallback = "unknown"): string {
+    return (value || fallback)
         .replace(/[^a-zA-Z0-9._ -]+/g, " ")
         .replace(/\s+/g, " ")
         .trim()
-        .slice(0, 56);
-    const name = `${prefix} ${shortSessionID(sessionID)}${suffix ? ` ${suffix}` : ""}`
+        .slice(0, 72);
+}
+
+function safeThreadName(prefix: string, sessionID: string, metadata: SessionMetadata | null | undefined): string {
+    const title = safeThreadNamePart(metadata?.title, "untitled");
+    const folder = metadata?.directory ? safeThreadNamePart(basename(metadata.directory), "") : "";
+    const branch = metadata?.branch ? safeThreadNamePart(metadata.branch, "") : "";
+    const context = [folder, branch].filter(Boolean).join(" ");
+    const label = [title, context].filter(Boolean).join(" - ");
+    const suffix = ` ${shortSessionID(sessionID)}`;
+    const head = `${prefix} ${label || "session"}`
         .replace(/\s+/g, " ")
         .trim()
-        .slice(0, 100);
-    return name || `${prefix} ${shortSessionID(sessionID)}`.slice(0, 100);
+        .slice(0, Math.max(1, 100 - suffix.length))
+        .trim();
+    return `${head}${suffix}`.replace(/\s+/g, " ").trim().slice(0, 100) || `${prefix} ${shortSessionID(sessionID)}`.slice(0, 100);
 }
 
 function optionString(options: JsonObject, key: string, envNames: string[], fallback = ""): string {
@@ -313,7 +504,7 @@ function parseConfig(options?: Record<string, unknown>): Config {
         autoAttachLatest: optionBool(pluginOptions, "autoAttachLatest", ["OPENCODE_DISCORD_AUTO_ATTACH"], true),
         autoCreateSession: optionBool(pluginOptions, "autoCreateSession", ["OPENCODE_DISCORD_AUTO_CREATE_SESSION"], true),
         includeReasoning: optionBool(pluginOptions, "includeReasoning", ["OPENCODE_DISCORD_INCLUDE_REASONING"], true),
-        includeToolOutput: optionBool(pluginOptions, "includeToolOutput", ["OPENCODE_DISCORD_INCLUDE_TOOL_OUTPUT"], true),
+        includeToolOutput: optionBool(pluginOptions, "includeToolOutput", ["OPENCODE_DISCORD_INCLUDE_TOOL_OUTPUT"], false),
         threadsEnabled: optionBool(pluginOptions, "threadsEnabled", ["OPENCODE_DISCORD_SESSION_THREADS"], false),
         threadType: threadTypeValue(optionString(pluginOptions, "threadType", ["OPENCODE_DISCORD_THREAD_TYPE"], "public")),
         threadAutoArchiveMinutes: normalizeThreadArchiveMinutes(
@@ -327,6 +518,8 @@ function parseConfig(options?: Record<string, unknown>): Config {
             ),
         ),
         threadNamePrefix: optionString(pluginOptions, "threadNamePrefix", ["OPENCODE_DISCORD_THREAD_NAME_PREFIX"], "opencode"),
+        forumPostsEnabled: optionBool(pluginOptions, "forumPostsEnabled", ["OPENCODE_DISCORD_FORUM_POSTS"], true),
+        forumTagsEnabled: optionBool(pluginOptions, "forumTagsEnabled", ["OPENCODE_DISCORD_FORUM_TAGS"], true),
         statePath: optionString(pluginOptions, "statePath", ["OPENCODE_DISCORD_STATE_PATH"], defaultStatePath()),
         initialSessionID: optionString(pluginOptions, "sessionID", ["OPENCODE_DISCORD_SESSION_ID"]) || null,
         agent: optionString(pluginOptions, "agent", ["OPENCODE_DISCORD_AGENT"]) || null,
@@ -336,6 +529,9 @@ function parseConfig(options?: Record<string, unknown>): Config {
         sendDelayMs: optionNumber(pluginOptions, "sendDelayMs", ["OPENCODE_DISCORD_SEND_DELAY_MS"], 750, 50, 10000),
         reconnectBaseMs: optionNumber(pluginOptions, "reconnectBaseMs", ["OPENCODE_DISCORD_RECONNECT_BASE_MS"], 1500, 250, 60000),
         reconnectMaxMs: optionNumber(pluginOptions, "reconnectMaxMs", ["OPENCODE_DISCORD_RECONNECT_MAX_MS"], 60000, 1000, 300000),
+        runtimeTtlMs: optionNumber(pluginOptions, "runtimeTtlMs", ["OPENCODE_DISCORD_RUNTIME_TTL_MS"], DEFAULT_RUNTIME_TTL_MS, 10000, 600000),
+        presenceUpdateMs: optionNumber(pluginOptions, "presenceUpdateMs", ["OPENCODE_DISCORD_PRESENCE_UPDATE_MS"], DEFAULT_PRESENCE_UPDATE_MS, 5000, 300000),
+        presenceEnabled: optionBool(pluginOptions, "presenceEnabled", ["OPENCODE_DISCORD_PRESENCE"], true),
         ignoredSessionTitleRe,
     };
 }
@@ -453,9 +649,78 @@ function jsonPreview(value: unknown, limit: number): string {
     }
 }
 
+function stripSystemReminders(text: string): string {
+    return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "").trim();
+}
+
 function fenced(language: string, content: string): string {
     const safe = content.replace(/```/g, "` ` `");
     return `\`\`\`${language}\n${safe}\n\`\`\``;
+}
+
+function embedText(text: string, limit = 4000): string {
+    return truncate(text.trim() || "No details.", limit);
+}
+
+function embedField(name: string, value: string, inline = true): { name: string; value: string; inline?: boolean } {
+    return {
+        name: truncate(name || "Field", 256),
+        value: truncate(value || "none", 1024),
+        inline,
+    };
+}
+
+function sessionFooter(sessionID: string | null | undefined): { text: string } {
+    return { text: `opencode session ${shortSessionID(sessionID)}` };
+}
+
+function makeEmbed(input: {
+    title: string;
+    description?: string | undefined;
+    color?: number | undefined;
+    fields?: Array<{ name: string; value: string; inline?: boolean }> | undefined;
+    sessionID?: string | null | undefined;
+}): DiscordEmbed {
+    const embed: DiscordEmbed = {
+        title: truncate(input.title, 256),
+        color: input.color || EMBED_COLOR.info,
+        timestamp: new Date().toISOString(),
+    };
+    if (input.description) embed.description = embedText(input.description);
+    if (input.fields?.length) embed.fields = input.fields.slice(0, 25).map((field) => embedField(field.name, field.value, field.inline));
+    if (input.sessionID !== undefined) embed.footer = sessionFooter(input.sessionID);
+    return embed;
+}
+
+function textMessage(content: string): DiscordOutboundMessage {
+    return { content };
+}
+
+function discordQuote(text: string, limit = 1500): string {
+    const cleaned = truncate(stripSystemReminders(text), limit);
+    return cleaned
+        .split("\n")
+        .map((line) => `> ${line}`.trimEnd())
+        .join("\n");
+}
+
+function transcriptLine(label: string, detail?: string | null): string {
+    const cleanDetail = detail ? stripSystemReminders(detail) : "";
+    return cleanDetail ? `-> ${label}: ${truncate(cleanDetail, 220)}` : `-> ${label}`;
+}
+
+function transcriptStreamMessage(kind: "assistant" | "thinking", text: string): DiscordOutboundMessage {
+    const cleaned = stripSystemReminders(text);
+    if (kind === "assistant") return textMessage(cleaned);
+
+    const [first = "working", ...rest] = cleaned.split("\n");
+    const title = first.trim() || "working";
+    const body = rest.join("\n").trim();
+    return textMessage(body ? `*Thinking: ${truncate(title, 160)}*\n${discordQuote(body)}` : `*Thinking: ${truncate(title, 160)}*`);
+}
+
+function embedMessage(embed: DiscordEmbed): DiscordOutboundMessage {
+    return { embeds: [embed] };
 }
 
 function shortSessionID(sessionID: string | null | undefined): string {
@@ -497,61 +762,327 @@ function titleFromEvent(event: JsonObject): string | null {
     return stringValue(info?.title);
 }
 
-function partKey(part: JsonObject): string {
-    const sessionID = stringValue(part.sessionID) || stringValue(part.sessionId) || "unknown-session";
-    const messageID = stringValue(part.messageID) || stringValue(part.messageId) || "unknown-message";
-    const partID = stringValue(part.id) || "unknown-part";
-    return `${sessionID}:${messageID}:${partID}`;
+function sessionObjectFromValue(value: unknown): JsonObject | null {
+    const data = asObject(unwrapData(value));
+    if (!data) return null;
+    return asObject(data.info) || data;
 }
 
-function getPartDelta(part: JsonObject, properties: JsonObject, progress: Map<string, TextPartProgress>): string {
+function sessionIDFromObject(object: JsonObject | null | undefined): string | null {
+    if (!object) return null;
+    return stringValue(object.id) || stringValue(object.sessionID) || stringValue(object.sessionId);
+}
+
+function modelFromValue(value: unknown, variantValue?: unknown): ModelMetadata | null {
+    const object = asObject(value);
+    if (!object) return null;
+    const providerID = stringValue(object.providerID) || stringValue(object.providerId) || stringValue(object.provider);
+    const modelID = stringValue(object.modelID) || stringValue(object.modelId) || stringValue(object.model);
+    if (!providerID || !modelID) return null;
+    return {
+        providerID,
+        modelID,
+        variant: stringValue(variantValue) || stringValue(object.variant),
+    };
+}
+
+function modelFromMessage(message: JsonObject): ModelMetadata | null {
+    const direct = modelFromValue(message.model, message.variant);
+    if (direct) return direct;
+
+    const providerID = stringValue(message.providerID) || stringValue(message.providerId) || stringValue(message.provider);
+    const modelID = stringValue(message.modelID) || stringValue(message.modelId) || stringValue(message.model);
+    if (!providerID || !modelID) return null;
+    return {
+        providerID,
+        modelID,
+        variant: stringValue(message.variant),
+    };
+}
+
+function formatDirectory(value: string | null | undefined): string {
+    if (!value) return "unknown";
+    const home = homedir();
+    if (value === home) return "~";
+    if (value.startsWith(`${home}/`)) return `~/${value.slice(home.length + 1)}`;
+    return value;
+}
+
+function inlineCode(value: string | null | undefined): string {
+    return `\`${truncate((value || "unknown").replace(/`/g, "'"), 1000)}\``;
+}
+
+function modelLabel(model: ModelMetadata | null | undefined): string {
+    if (!model) return "unknown";
+    const base = `${model.providerID}/${model.modelID}`;
+    return model.variant ? `${base} (${model.variant})` : base;
+}
+
+function modelTagLabel(model: ModelMetadata | null | undefined, includeVariant: boolean): string | null {
+    if (!model) return null;
+    const base = `${model.providerID}/${model.modelID}`;
+    if (!includeVariant || !model.variant) return base;
+    return `${base} ${model.variant}`;
+}
+
+function compactForumTagName(value: string): string {
+    const cleaned = value
+        .replace(/[`\n\r\t]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!cleaned) return "unknown";
+    if (cleaned.length <= DISCORD_FORUM_TAG_LIMIT) return cleaned;
+
+    const suffixIndex = cleaned.lastIndexOf(":");
+    if (suffixIndex > 0) {
+        const suffix = cleaned.slice(suffixIndex);
+        const headLimit = DISCORD_FORUM_TAG_LIMIT - suffix.length - 3;
+        if (headLimit >= 4) return `${cleaned.slice(0, headLimit)}...${suffix}`;
+    }
+
+    return `${cleaned.slice(0, DISCORD_FORUM_TAG_LIMIT - 3)}...`;
+}
+
+function sessionForumTagNames(metadata: SessionMetadata): string[] {
+    const candidates = [
+        modelTagLabel(metadata.model, false),
+        modelTagLabel(metadata.model, true),
+        metadata.directory && metadata.branch ? `${formatDirectory(metadata.directory)}:${metadata.branch}` : null,
+    ];
+    const names = new Set<string>();
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        const name = compactForumTagName(candidate);
+        if (name) names.add(name);
+    }
+    return [...names].slice(0, DISCORD_THREAD_APPLIED_TAG_LIMIT);
+}
+
+function metadataSignature(metadata: SessionMetadata): string {
+    return [metadata.title || "", metadata.directory || "", metadata.branch || "", modelLabel(metadata.model)].join("\n");
+}
+
+function discordRequiresForumStarterMessage(error: unknown): boolean {
+    const text = String(error);
+    return text.includes("Invalid Form Body") && text.includes('"message"') && text.includes("BASE_TYPE_REQUIRED");
+}
+
+function discordCannotSendToChannel(error: unknown): boolean {
+    const text = String(error);
+    return text.includes('"code": 50008') || text.includes("Cannot send messages in a non-text channel");
+}
+
+function numericSeconds(value: string | null): number | null {
+    if (value === null) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function retryAfterSecondsFromBody(body: string): number | null {
+    try {
+        const parsed = asObject(JSON.parse(body));
+        const value = parsed?.retry_after;
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+        return numericSeconds(typeof value === "string" ? value : null);
+    } catch {
+        return null;
+    }
+}
+
+function discordRateLimitRetryAfterMs(response: Response, body: string): number | null {
+    const seconds =
+        numericSeconds(response.headers.get("Retry-After")) ??
+        numericSeconds(response.headers.get("X-RateLimit-Reset-After")) ??
+        retryAfterSecondsFromBody(body);
+    if (seconds === null) return null;
+    return Math.max(0, Math.ceil(seconds * 1000));
+}
+
+function isDiscordThreadContainerChannel(channel: JsonObject | null): boolean {
+    if (!channel) return false;
+    const type = typeof channel.type === "number" ? channel.type : Number(channel.type);
+    return type === DISCORD_GUILD_FORUM || type === DISCORD_GUILD_MEDIA || Array.isArray(channel.available_tags);
+}
+
+function extractStructuredObject(result: unknown): JsonObject | null {
+    const candidates = [
+        asObject(asObject(unwrapData(result))?.info)?.structured,
+        asObject(asObject(unwrapData(result))?.info)?.structured_output,
+        asObject(asObject(unwrapData(result))?.info)?.structuredOutput,
+        asObject(unwrapData(result))?.structured,
+        asObject(unwrapData(result))?.structured_output,
+        asObject(unwrapData(result))?.structuredOutput,
+        asObject(result)?.structured,
+        asObject(result)?.structured_output,
+        asObject(result)?.structuredOutput,
+    ];
+
+    for (const candidate of candidates) {
+        const object = asObject(candidate);
+        if (object) return object;
+    }
+
+    const parts = asArray(asObject(unwrapData(result))?.parts || asObject(result)?.parts);
+    const text = parts
+        .map((part) => {
+            const object = asObject(part) || {};
+            return stringValue(object.text) || stringValue(object.content) || "";
+        })
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+    if (!text) return null;
+
+    try {
+        return asObject(JSON.parse(text.replace(/^```json\s*/i, "").replace(/```$/i, "")));
+    } catch {
+        return null;
+    }
+}
+
+function normaliseForumIntakePlan(raw: JsonObject | null, fallbackTitle: string, fallbackPrompt: string, baseDirectory: string): ForumIntakePlan {
+    const directory = normaliseDirectory(stringValue(raw?.directory), baseDirectory);
+    const rawModel = asObject(raw?.model);
+    const providerID = stringValue(raw?.providerID) || stringValue(raw?.providerId) || stringValue(rawModel?.providerID) || stringValue(rawModel?.providerId);
+    const modelID = stringValue(raw?.modelID) || stringValue(raw?.modelId) || stringValue(rawModel?.modelID) || stringValue(rawModel?.modelId);
+    return {
+        title: truncate(stringValue(raw?.title) || fallbackTitle || "Discord forum session", 120),
+        directory,
+        model: providerID && modelID ? { providerID, modelID, variant: stringValue(raw?.variant) } : null,
+        prompt: stringValue(raw?.prompt) || fallbackPrompt,
+    };
+}
+
+function normaliseDirectory(value: string | null | undefined, baseDirectory = directoryFromProcess()): string | null {
+    if (!value) return null;
+    let candidate = value.trim();
+    if (!candidate || candidate.includes("\0")) return null;
+    if (candidate.startsWith("file://")) {
+        try {
+            candidate = new URL(candidate).pathname;
+        } catch {
+            return null;
+        }
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(candidate)) return null;
+    return isAbsolute(candidate) ? resolve(candidate) : resolve(baseDirectory, candidate);
+}
+
+function directoryFromProcess(): string {
+    try {
+        return process.cwd();
+    } catch {
+        return homedir();
+    }
+}
+
+function textPartProgressKey(sessionID: string, partID: string, kind: "assistant" | "thinking"): string {
+    return `${sessionID}:${partID}:${kind}`;
+}
+
+function getPartDelta(sessionID: string, partID: string, kind: "assistant" | "thinking", part: JsonObject, properties: JsonObject, progress: Map<string, TextPartProgress>): string {
     const explicitDelta = stringValue(properties.delta);
     if (explicitDelta !== null) {
         const currentText = stringValue(part.text) || "";
-        progress.set(partKey(part), { length: currentText.length });
+        progress.set(textPartProgressKey(sessionID, partID, kind), { length: currentText.length });
         return explicitDelta;
     }
 
     const text = stringValue(part.text) || "";
-    const key = partKey(part);
+    const key = textPartProgressKey(sessionID, partID, kind);
     const previous = progress.get(key)?.length || 0;
     progress.set(key, { length: text.length });
     if (text.length <= previous) return "";
     return text.slice(previous);
 }
 
-function formatToolStart(tool: string, sessionID: string, callID: string, args: unknown, maxChars: number): string {
-    const parts = [`**tool start** \`${tool}\` in \`${shortSessionID(sessionID)}\``, `call: \`${callID || "unknown"}\``];
-    const preview = jsonPreview(args, maxChars);
-    if (preview) parts.push(fenced("json", preview));
-    return parts.join("\n");
+function normaliseToolName(tool: string): string {
+    const parts = tool.toLowerCase().split(/[.:/]+/).filter(Boolean);
+    return parts[parts.length - 1] || tool.toLowerCase();
 }
 
-function formatToolDone(tool: string, sessionID: string, callID: string, output: JsonObject, maxChars: number, includeOutput: boolean): string {
-    const title = stringValue(output.title) || tool;
-    const rows = [`**tool done** \`${tool}\` in \`${shortSessionID(sessionID)}\``, `call: \`${callID || "unknown"}\``, `title: ${title}`];
-    if (includeOutput) {
-        const rendered = stringValue(output.output) || jsonPreview(output.metadata, maxChars);
-        if (rendered) rows.push(fenced("text", truncate(rendered, maxChars)));
-    }
-    return rows.join("\n");
+function isImportantTool(tool: string): boolean {
+    return IMPORTANT_TOOL_NAMES.has(normaliseToolName(tool));
 }
 
-function formatPermission(permission: PendingPermission, prefix = DEFAULT_PREFIX, slashCommand = DEFAULT_SLASH_COMMAND): string {
+function compactToolArgs(tool: string, args: unknown): string | null {
+    const object = asObject(args);
+    if (!object) return null;
+    const keys = normaliseToolName(tool) === "bash"
+        ? ["description", "command", "workdir"]
+        : ["description", "filePath", "path", "pattern", "include", "url", "target", "command"];
+    const rows = keys
+        .map((key) => {
+            const value = stringValue(object[key]);
+            return value ? `${key}: ${truncate(value, 180)}` : null;
+        })
+        .filter((row): row is string => Boolean(row));
+    return rows.length ? rows.join("\n") : null;
+}
+
+function numberFromUnknown(value: unknown): number | null {
+    const parsed = typeof value === "number" ? value : Number(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toolOutputFailed(output: JsonObject): boolean {
+    if (output.error || output.errors || output.exception) return true;
+    const metadata = asObject(output.metadata) || {};
+    const status = [output.status, output.state, metadata.status, metadata.state, output.title]
+        .map((entry) => stringValue(entry) || "")
+        .join(" ");
+    if (/\b(error|failed|failure|denied|timeout|cancelled)\b/i.test(status)) return true;
+    const exitCode = numberFromUnknown(output.exitCode) ?? numberFromUnknown(output.exit_code) ?? numberFromUnknown(metadata.exitCode) ?? numberFromUnknown(metadata.exit_code);
+    return exitCode !== null && exitCode !== 0;
+}
+
+function toolOutputPreview(output: JsonObject, maxChars: number): string {
+    return stringValue(output.error) || stringValue(output.output) || jsonPreview(output.metadata, maxChars) || "";
+}
+
+function formatToolResultMessage(
+    tool: string,
+    callID: string,
+    args: unknown,
+    output: JsonObject,
+    maxChars: number,
+    includeOutput: boolean,
+    failed: boolean,
+): DiscordOutboundMessage {
+    const title = stringValue(output.title) || (failed ? "failed" : "done");
+    const argsSummary = compactToolArgs(tool, args);
+    const preview = failed || includeOutput ? toolOutputPreview(output, maxChars) : "";
+    const lines = [transcriptLine(failed ? `${tool} failed` : tool, title)];
+    if (failed && argsSummary) lines.push(discordQuote(argsSummary, 500));
+    if (preview) lines.push(fenced("text", truncate(preview, Math.min(maxChars, failed ? 900 : 500))));
+    if (failed) lines.push(`call: \`${callID || "unknown"}\``);
+    return textMessage(lines.join("\n"));
+}
+
+function formatPermissionEmbed(permission: PendingPermission, prefix = DEFAULT_PREFIX, slashCommand = DEFAULT_SLASH_COMMAND): DiscordEmbed {
     const patterns = permission.patterns.length ? permission.patterns.join(", ") : "no patterns";
-    return [
-        `**permission asked** \`${permission.requestID}\` in \`${shortSessionID(permission.sessionID)}\``,
-        permission.title,
-        `patterns: ${patterns}`,
-        `Reply with \`${prefix} allow ${permission.requestID}\`, \`${prefix} always ${permission.requestID}\`, \`${prefix} deny ${permission.requestID}\`, or \`/${slashCommand} allow id:${permission.requestID}\`.`,
-    ].join("\n");
+    return makeEmbed({
+        title: `${ICON.permission} Permission requested`,
+        description: permission.title,
+        color: EMBED_COLOR.warning,
+        fields: [
+            { name: "Request", value: `\`${permission.requestID}\`` },
+            { name: "Patterns", value: truncate(patterns, 1024), inline: false },
+            {
+                name: "Reply",
+                value: `\`${prefix} allow ${permission.requestID}\`, \`${prefix} always ${permission.requestID}\`, \`${prefix} deny ${permission.requestID}\`, or \`/${slashCommand} allow id:${permission.requestID}\``,
+                inline: false,
+            },
+        ],
+        sessionID: permission.sessionID,
+    });
 }
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export const DiscordRemoteControl: Plugin = async ({ client, directory }, options) => {
+export const DiscordRemoteControl: Plugin = async ({ client, directory }: PluginContext, options?: Record<string, unknown>) => {
     const config = parseConfig(options);
     const opencode = client as OpenCodeClientLike;
     const pendingPermissions = new Map<string, PendingPermission>();
@@ -560,11 +1091,22 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     const streamBuffers = new Map<string, StreamBuffer>();
     const seenToolStates = new Set<string>();
     const sessionTitles = new Map<string, string>();
+    const sessionMetadata = new Map<string, SessionMetadata>();
+    const announcedMetadataSignatures = new Map<string, string>();
+    const syncedMetadataSignatures = new Map<string, string>();
     const sessionThreads = new Map<string, string>();
     const threadSessions = new Map<string, string>();
     const threadCreatePromises = new Map<string, Promise<string | null>>();
     const threadFailures = new Set<string>();
-    let persistentState: PersistentState = { version: 1, registrations: {}, threads: {} };
+    const threadNames = new Map<string, string>();
+    const lastSessionMessages = new Map<string, SessionMessageReference>();
+    const forumTagCache = new Map<string, DiscordForumTag>();
+    const forumThreads = new Map<string, ForumThreadState>();
+    const forumIntakes = new Set<string>();
+    const controlFallbackWarnings = new Set<string>();
+    const instanceID = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const instanceStartedAt = Date.now();
+    let persistentState: PersistentState = { version: 1, registrations: {}, threads: {}, runtimes: {} };
     let applicationID = config.applicationID;
     let activeSessionID = config.initialSessionID;
     let activeSessionLocked = Boolean(config.initialSessionID);
@@ -579,6 +1121,10 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     let reconnectAttempts = 0;
     let heartbeatAcked = true;
     let gatewayStopped = false;
+    let presenceTimer: ReturnType<typeof setInterval> | null = null;
+    let currentBranch: string | null = null;
+    let configuredChannelHasForumTags: boolean | null = null;
+    let controlChannelCanReceiveMessages: boolean | null = null;
 
     async function log(level: LogLevel, message: string, extra: JsonObject = {}): Promise<void> {
         try {
@@ -596,6 +1142,180 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         }
     }
 
+    function metadataForSession(sessionID: string): SessionMetadata {
+        const existing = sessionMetadata.get(sessionID);
+        if (existing) return existing;
+        const metadata: SessionMetadata = {
+            id: sessionID,
+            title: sessionTitles.get(sessionID) || null,
+            directory,
+            branch: currentBranch,
+            model: null,
+        };
+        sessionMetadata.set(sessionID, metadata);
+        return metadata;
+    }
+
+    function rememberSessionMetadata(sessionID: string, updates: Partial<Omit<SessionMetadata, "id">>): SessionMetadata {
+        const next: SessionMetadata = {
+            ...metadataForSession(sessionID),
+            ...updates,
+            id: sessionID,
+        };
+        sessionMetadata.set(sessionID, next);
+        if (next.title) sessionTitles.set(sessionID, next.title);
+        return next;
+    }
+
+    function rememberSessionObject(object: JsonObject | null | undefined, fallbackSessionID?: string | null): SessionMetadata | null {
+        const sessionID = sessionIDFromObject(object) || fallbackSessionID || null;
+        if (!sessionID) return null;
+        const existing = metadataForSession(sessionID);
+        const targetDirectory = stringValue(object?.directory) || existing.directory || directory;
+        return rememberSessionMetadata(sessionID, {
+            title: stringValue(object?.title) || existing.title,
+            directory: targetDirectory,
+            branch: existing.branch || (targetDirectory === directory ? currentBranch : null),
+        });
+    }
+
+    function rememberModelMetadata(sessionID: string, model: ModelMetadata | null): SessionMetadata {
+        if (!model) return metadataForSession(sessionID);
+        return rememberSessionMetadata(sessionID, { model });
+    }
+
+    function sessionMetadataFields(metadata: SessionMetadata): Array<{ name: string; value: string; inline?: boolean }> {
+        return [
+            { name: "Title", value: metadata.title || "untitled", inline: false },
+            { name: "Folder", value: inlineCode(formatDirectory(metadata.directory)), inline: false },
+            { name: "Branch", value: inlineCode(metadata.branch || "unknown") },
+            { name: "Model/variant", value: inlineCode(modelLabel(metadata.model)), inline: false },
+        ];
+    }
+
+    function sessionMetadataEmbed(sessionID: string, title: string): DiscordEmbed {
+        const metadata = metadataForSession(sessionID);
+        return makeEmbed({
+            title,
+            color: EMBED_COLOR.info,
+            fields: sessionMetadataFields(metadata),
+            sessionID,
+        });
+    }
+
+    function legacySessionPath(sessionID: string): JsonObject {
+        return { id: sessionID, sessionID };
+    }
+
+    async function callSessionCreate(title: string, targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.create) return null;
+        try {
+            return await opencode.session.create({ title, directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session create with flat shape failed; retrying legacy shape", { title, targetDirectory, error: String(error) });
+            return await opencode.session.create({ body: { title }, query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionList(targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.list) return null;
+        try {
+            return await opencode.session.list({ directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session list with flat shape failed; retrying legacy shape", { targetDirectory, error: String(error) });
+            return await opencode.session.list({ query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionStatus(targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.status) return null;
+        try {
+            return await opencode.session.status({ directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session status with flat shape failed; retrying legacy shape", { targetDirectory, error: String(error) });
+            return await opencode.session.status({ query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionGet(sessionID: string, targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.get) return null;
+        try {
+            return await opencode.session.get({ sessionID, directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session get with flat shape failed; retrying legacy shape", { sessionID, targetDirectory, error: String(error) });
+            return await opencode.session.get({ path: legacySessionPath(sessionID), query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionAbort(sessionID: string, targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.abort) return null;
+        try {
+            return await opencode.session.abort({ sessionID, directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session abort with flat shape failed; retrying legacy shape", { sessionID, targetDirectory, error: String(error) });
+            return await opencode.session.abort({ path: legacySessionPath(sessionID), query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionDelete(sessionID: string, targetDirectory = directory): Promise<unknown> {
+        if (!opencode.session?.delete) return null;
+        try {
+            return await opencode.session.delete({ sessionID, directory: targetDirectory });
+        } catch (error) {
+            await log("debug", "Session delete with flat shape failed; retrying legacy shape", { sessionID, targetDirectory, error: String(error) });
+            return await opencode.session.delete({ path: legacySessionPath(sessionID), query: { directory: targetDirectory } });
+        }
+    }
+
+    async function callSessionPrompt(method: "prompt" | "promptAsync", sessionID: string, targetDirectory: string, body: JsonObject): Promise<unknown> {
+        const sessionApi = opencode.session;
+        const fn = sessionApi?.[method];
+        if (!fn) return null;
+        try {
+            return await fn.call(sessionApi, { sessionID, directory: targetDirectory, ...body });
+        } catch (error) {
+            await log("debug", `Session ${method} with flat shape failed; retrying legacy shape`, { sessionID, targetDirectory, error: String(error) });
+            return await fn.call(sessionApi, { path: legacySessionPath(sessionID), body, query: { directory: targetDirectory } });
+        }
+    }
+
+    async function refreshBranch(targetDirectory = directory): Promise<string | null> {
+        if (!opencode.vcs?.get) return currentBranch;
+        try {
+            const result = await opencode.vcs.get({ directory: targetDirectory });
+            const branch = stringValue(asObject(unwrapData(result))?.branch);
+            if (branch && targetDirectory === directory) currentBranch = branch;
+            if (branch) return branch;
+        } catch (error) {
+            try {
+                const result = await opencode.vcs.get({ query: { directory: targetDirectory } });
+                const branch = stringValue(asObject(unwrapData(result))?.branch);
+                if (branch && targetDirectory === directory) currentBranch = branch;
+                if (branch) return branch;
+            } catch (fallbackError) {
+                await log("debug", "Failed to refresh branch from OpenCode VCS API", {
+                    error: String(error),
+                    fallbackError: String(fallbackError),
+                });
+            }
+        }
+        return targetDirectory === directory ? currentBranch : null;
+    }
+
+    async function ensureSessionMetadata(sessionID: string): Promise<SessionMetadata> {
+        const knownDirectory = metadataForSession(sessionID).directory || directory;
+        const branch = await refreshBranch(knownDirectory);
+        try {
+            const result = await callSessionGet(sessionID, knownDirectory);
+            rememberSessionObject(sessionObjectFromValue(result), sessionID);
+        } catch (error) {
+            await log("debug", "Failed to refresh session metadata from OpenCode", { sessionID, error: String(error) });
+        }
+        const metadata = metadataForSession(sessionID);
+        if (branch && !metadata.branch) return rememberSessionMetadata(sessionID, { branch });
+        return metadata;
+    }
+
     function threadStateKey(): string {
         return `${config.channelID}:${config.threadType}`;
     }
@@ -605,6 +1325,8 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     }
 
     function hydrateThreadState(): void {
+        sessionThreads.clear();
+        threadSessions.clear();
         const threads = persistentState.threads[threadStateKey()] || {};
         for (const [sessionID, threadID] of Object.entries(threads)) {
             if (!sessionID || !threadID) continue;
@@ -613,27 +1335,98 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         }
     }
 
+    function normalisePersistentState(parsed: JsonObject | null): PersistentState {
+        const registrations = asObject(parsed?.registrations) || {};
+        const threads = asObject(parsed?.threads) || {};
+        const runtimes = asObject(parsed?.runtimes) || {};
+
+        return {
+            version: 1,
+            registrations: Object.fromEntries(Object.entries(registrations).map(([key, value]) => [key, String(value)])),
+            threads: Object.fromEntries(
+                Object.entries(threads).map(([key, value]) => {
+                    const mapping = asObject(value) || {};
+                    return [key, Object.fromEntries(Object.entries(mapping).map(([sessionID, threadID]) => [sessionID, String(threadID)]))];
+                }),
+            ),
+            runtimes: Object.fromEntries(
+                Object.entries(runtimes)
+                    .map(([key, value]) => {
+                        const runtime = asObject(value);
+                        if (!runtime) return null;
+                        const updatedAt = numberValue(runtime.updatedAt, 0, 0, Number.MAX_SAFE_INTEGER);
+                        const startedAt = numberValue(runtime.startedAt, updatedAt, 0, Number.MAX_SAFE_INTEGER);
+                        const pid = numberValue(runtime.pid, 0, 0, Number.MAX_SAFE_INTEGER);
+                        if (!updatedAt || !pid) return null;
+                        return [
+                            key,
+                            {
+                                instanceID: stringValue(runtime.instanceID) || key,
+                                pid,
+                                directory: stringValue(runtime.directory) || "unknown",
+                                activeSessionID: stringValue(runtime.activeSessionID),
+                                startedAt,
+                                updatedAt,
+                            } satisfies RuntimeState,
+                        ] as const;
+                    })
+                    .filter((entry): entry is readonly [string, RuntimeState] => Boolean(entry)),
+            ),
+        };
+    }
+
+    async function readPersistentStateFromDisk(): Promise<PersistentState> {
+        const raw = await readFile(config.statePath, "utf8");
+        return normalisePersistentState(asObject(JSON.parse(raw)));
+    }
+
+    function pruneRuntimeState(now = Date.now()): void {
+        persistentState.runtimes = Object.fromEntries(
+            Object.entries(persistentState.runtimes).filter(([, runtime]) => now - runtime.updatedAt <= config.runtimeTtlMs),
+        );
+    }
+
+    async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+        const lockPath = `${config.statePath}.lock`;
+        await mkdir(dirname(config.statePath), { recursive: true });
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            let handle: Awaited<ReturnType<typeof open>> | null = null;
+            try {
+                handle = await open(lockPath, "wx");
+                await handle.writeFile(`${process.pid}\n`, "utf8");
+                return await fn();
+            } catch (error) {
+                const code = asObject(error)?.code;
+                if (code !== "EEXIST") throw error;
+
+                try {
+                    const info = await stat(lockPath);
+                    if (Date.now() - info.mtimeMs > 10000) await rm(lockPath, { force: true });
+                } catch {
+                    // Another process may have removed the lock between open and stat.
+                }
+                await sleep(50 + attempt * 25);
+            } finally {
+                if (handle) {
+                    await handle.close().catch(() => undefined);
+                    await rm(lockPath, { force: true }).catch(() => undefined);
+                }
+            }
+        }
+
+        throw new Error(`Timed out waiting for Discord plugin state lock: ${lockPath}`);
+    }
+
     async function loadPersistentState(): Promise<void> {
         try {
-            const raw = await readFile(config.statePath, "utf8");
-            const parsed = asObject(JSON.parse(raw));
-            const registrations = asObject(parsed?.registrations) || {};
-            const threads = asObject(parsed?.threads) || {};
-            persistentState = {
-                version: 1,
-                registrations: Object.fromEntries(Object.entries(registrations).map(([key, value]) => [key, String(value)])),
-                threads: Object.fromEntries(
-                    Object.entries(threads).map(([key, value]) => {
-                        const mapping = asObject(value) || {};
-                        return [key, Object.fromEntries(Object.entries(mapping).map(([sessionID, threadID]) => [sessionID, String(threadID)]))];
-                    }),
-                ),
-            };
+            persistentState = await readPersistentStateFromDisk();
+            pruneRuntimeState();
             hydrateThreadState();
         } catch (error) {
             const code = asObject(error)?.code;
             if (code !== "ENOENT") await log("warn", "Failed to load Discord plugin state; starting with empty state", { error: String(error) });
-            persistentState = { version: 1, registrations: {}, threads: {} };
+            persistentState = { version: 1, registrations: {}, threads: {}, runtimes: {} };
         }
     }
 
@@ -646,16 +1439,89 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         }
     }
 
-    async function persistThreadMapping(sessionID: string, threadID: string): Promise<void> {
-        const key = threadStateKey();
-        persistentState.threads[key] = {
-            ...(persistentState.threads[key] || {}),
-            [sessionID]: threadID,
-        };
-        await savePersistentState();
+    async function mutatePersistentState(mutator: (state: PersistentState) => void): Promise<void> {
+        await withStateLock(async () => {
+            try {
+                persistentState = await readPersistentStateFromDisk();
+            } catch (error) {
+                const code = asObject(error)?.code;
+                if (code !== "ENOENT") throw error;
+                persistentState = { version: 1, registrations: {}, threads: {}, runtimes: {} };
+            }
+            pruneRuntimeState();
+            mutator(persistentState);
+            await savePersistentState();
+            hydrateThreadState();
+        });
     }
 
-    async function discordFetch(route: string, init: RequestInit = {}): Promise<unknown> {
+    async function persistThreadMapping(sessionID: string, threadID: string): Promise<void> {
+        await mutatePersistentState((state) => {
+            const key = threadStateKey();
+            state.threads[key] = {
+                ...(state.threads[key] || {}),
+                [sessionID]: threadID,
+            };
+        });
+    }
+
+    async function bindSessionThread(sessionID: string, threadID: string, name?: string | null): Promise<void> {
+        sessionThreads.set(sessionID, threadID);
+        threadSessions.set(threadID, sessionID);
+        if (name) threadNames.set(threadID, name);
+        await persistThreadMapping(sessionID, threadID);
+    }
+
+    function runtimeEntries(): RuntimeState[] {
+        pruneRuntimeState();
+        return Object.values(persistentState.runtimes).sort((a, b) => a.startedAt - b.startedAt || a.pid - b.pid);
+    }
+
+    function coordinatorRuntime(): RuntimeState | null {
+        return runtimeEntries()[0] || null;
+    }
+
+    function connectedSessionCount(): number {
+        const sessionIDs = new Set(
+            runtimeEntries()
+                .map((runtime) => runtime.activeSessionID)
+                .filter((sessionID): sessionID is string => Boolean(sessionID)),
+        );
+        return sessionIDs.size || runtimeEntries().length;
+    }
+
+    function localOwnsSession(sessionID: string | null | undefined): boolean {
+        return Boolean(sessionID && activeSessionID === sessionID);
+    }
+
+    async function markRuntimeState(updatePresence = true): Promise<void> {
+        await mutatePersistentState((state) => {
+            state.runtimes[instanceID] = {
+                instanceID,
+                pid: process.pid,
+                directory,
+                activeSessionID,
+                startedAt: instanceStartedAt,
+                updatedAt: Date.now(),
+            };
+        });
+
+        if (updatePresence) sendPresence();
+    }
+
+    async function removeRuntimeState(): Promise<void> {
+        await mutatePersistentState((state) => {
+            delete state.runtimes[instanceID];
+        });
+        sendPresence();
+    }
+
+    async function isCoordinatorRuntime(): Promise<boolean> {
+        await loadPersistentState();
+        return coordinatorRuntime()?.instanceID === instanceID;
+    }
+
+    async function discordFetch(route: string, init: RequestInit = {}, attempt = 0): Promise<unknown> {
         const response = await fetch(`${DISCORD_API}${route}`, {
             ...init,
             headers: {
@@ -668,6 +1534,19 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         if (response.status === 204) return null;
 
         const text = await response.text();
+        if (response.status === 429 && attempt < DISCORD_RATE_LIMIT_MAX_RETRIES) {
+            const retryAfterMs = discordRateLimitRetryAfterMs(response, text);
+            if (retryAfterMs !== null && retryAfterMs <= DISCORD_RATE_LIMIT_MAX_WAIT_MS) {
+                await log("warn", "Discord rate limit hit; retrying request", {
+                    route,
+                    retryAfterMs,
+                    attempt: attempt + 1,
+                });
+                await sleep(retryAfterMs);
+                return await discordFetch(route, init, attempt + 1);
+            }
+        }
+
         if (!response.ok) {
             throw new Error(`Discord API ${response.status}: ${truncate(text, 500)}`);
         }
@@ -694,6 +1573,146 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         return JSON.parse(text) as unknown;
     }
 
+    async function renameDiscordThread(threadID: string, name: string): Promise<void> {
+        if (threadNames.get(threadID) === name) return;
+        await discordFetch(`/channels/${threadID}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name }),
+        });
+        threadNames.set(threadID, name);
+    }
+
+    async function reactToDiscordMessage(channelID: string, messageID: string, emoji: string): Promise<void> {
+        await discordFetch(`/channels/${channelID}/messages/${messageID}/reactions/${encodeURIComponent(emoji)}/@me`, {
+            method: "PUT",
+        });
+    }
+
+    function rememberLastSessionMessage(sessionID: string | null | undefined, channelID: string, messageID: string | null): void {
+        if (!sessionID || !messageID) return;
+        lastSessionMessages.set(sessionID, { channelID, messageID });
+    }
+
+    function shouldRememberSessionMessage(sessionID: string | null | undefined, channelID: string): boolean {
+        if (!sessionID) return false;
+        if (!config.threadsEnabled) return true;
+        if (channelID !== config.channelID) return true;
+        return !sessionThreads.has(sessionID);
+    }
+
+    async function reactToLatestSessionMessage(sessionID: string | null | undefined, emoji: string): Promise<void> {
+        if (!sessionID) return;
+        const target = lastSessionMessages.get(sessionID);
+        if (!target) return;
+        await reactToDiscordMessage(target.channelID, target.messageID, emoji);
+    }
+
+    async function reactToCommandSource(context: CommandContext, emoji: string): Promise<boolean> {
+        if (!context.sourceChannelID || !context.sourceMessageID) return false;
+        await reactToDiscordMessage(context.sourceChannelID, context.sourceMessageID, emoji);
+        return true;
+    }
+
+    function relayReaction(emoji: string, sessionID: string | null | undefined): void {
+        void reactToLatestSessionMessage(sessionID, emoji).catch(async (error: unknown) => {
+            await log("debug", "Failed to react to latest Discord session message", { sessionID: sessionID || "none", error: String(error) });
+        });
+    }
+
+    function parseForumTags(value: unknown): DiscordForumTag[] {
+        const tags: DiscordForumTag[] = [];
+        for (const entry of asArray(value)) {
+            const object = asObject(entry);
+            const name = stringValue(object?.name);
+            if (!name) continue;
+            const tag: DiscordForumTag = { name };
+            const id = stringValue(object?.id);
+            if (id) tag.id = id;
+            if (typeof object?.moderated === "boolean") tag.moderated = object.moderated;
+            if (typeof object?.emoji_id === "string" || object?.emoji_id === null) tag.emoji_id = object.emoji_id;
+            if (typeof object?.emoji_name === "string" || object?.emoji_name === null) tag.emoji_name = object.emoji_name;
+            tags.push(tag);
+        }
+        return tags;
+    }
+
+    async function loadForumTagCache(): Promise<DiscordForumTag[]> {
+        if (configuredChannelHasForumTags === false) return [];
+        const channel = asObject(await discordFetch(`/channels/${config.channelID}`, { method: "GET" })) || {};
+        controlChannelCanReceiveMessages = isDiscordThreadContainerChannel(channel) ? false : controlChannelCanReceiveMessages ?? true;
+        if (!Array.isArray(channel.available_tags)) {
+            configuredChannelHasForumTags = false;
+            return [];
+        }
+
+        configuredChannelHasForumTags = true;
+        const tags = parseForumTags(channel.available_tags);
+        forumTagCache.clear();
+        for (const tag of tags) {
+            forumTagCache.set(tag.name.toLowerCase(), tag);
+        }
+        return tags;
+    }
+
+    async function ensureForumTagIDs(names: string[]): Promise<string[]> {
+        if (!config.forumTagsEnabled || !names.length) return [];
+        let tags = await loadForumTagCache();
+        if (configuredChannelHasForumTags !== true) return [];
+
+        const missing = names.filter((name) => !forumTagCache.get(name.toLowerCase()));
+        if (missing.length) {
+            const remainingSlots = DISCORD_FORUM_AVAILABLE_TAG_LIMIT - tags.length;
+            const creatable = missing.slice(0, Math.max(0, remainingSlots));
+            if (!creatable.length) {
+                await log("warn", "Discord forum tag limit reached; could not create session metadata tags", { names: missing.join(", ") });
+            } else {
+                const updatedChannel = asObject(
+                    await discordFetch(`/channels/${config.channelID}`, {
+                        method: "PATCH",
+                        headers: { "X-Audit-Log-Reason": "OpenCode session metadata tags" },
+                        body: JSON.stringify({
+                            available_tags: [...tags, ...creatable.map((name) => ({ name }))],
+                        }),
+                    }),
+                ) || {};
+                tags = parseForumTags(updatedChannel.available_tags);
+                forumTagCache.clear();
+                for (const tag of tags) {
+                    forumTagCache.set(tag.name.toLowerCase(), tag);
+                }
+                if (creatable.length < missing.length) {
+                    await log("warn", "Discord forum tag limit reached before all session tags were created", { names: missing.slice(creatable.length).join(", ") });
+                }
+            }
+        }
+
+        return names
+            .map((name) => stringValue(forumTagCache.get(name.toLowerCase())?.id))
+            .filter((id): id is string => Boolean(id))
+            .slice(0, DISCORD_THREAD_APPLIED_TAG_LIMIT);
+    }
+
+    async function applyForumTagsToThread(sessionID: string, threadID: string): Promise<void> {
+        const tagNames = sessionForumTagNames(metadataForSession(sessionID));
+        const tagIDs = await ensureForumTagIDs(tagNames);
+        if (!tagIDs.length) return;
+
+        const thread = asObject(await discordFetch(`/channels/${threadID}`, { method: "GET" })) || {};
+        const existing = asArray(thread.applied_tags)
+            .map((entry) => String(entry))
+            .filter(Boolean);
+        const applied = [...new Set([...existing, ...tagIDs])].slice(0, DISCORD_THREAD_APPLIED_TAG_LIMIT);
+        if (applied.length === existing.length && applied.every((tagID, index) => tagID === existing[index])) return;
+        if (!tagIDs.every((tagID) => applied.includes(tagID))) {
+            await log("warn", "Discord thread tag limit reached before all session tags were applied", { sessionID, threadID, tagNames: tagNames.join(", ") });
+        }
+
+        await discordFetch(`/channels/${threadID}`, {
+            method: "PATCH",
+            body: JSON.stringify({ applied_tags: applied }),
+        });
+    }
+
     async function registerSlashCommand(id: string): Promise<void> {
         if (!config.slashCommandsEnabled || !config.registerSlashCommands) return;
 
@@ -708,8 +1727,9 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             body: JSON.stringify(definition),
         });
 
-        persistentState.registrations[stateKey] = signature;
-        await savePersistentState();
+        await mutatePersistentState((state) => {
+            state.registrations[stateKey] = signature;
+        });
         await log("info", "Registered Discord slash command", {
             command: config.slashCommand,
             scope: config.guildID ? "guild" : "global",
@@ -747,7 +1767,31 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     }
 
     function isAllowedDiscordChannel(channelID: string | null | undefined): boolean {
-        return Boolean(channelID && (channelID === config.channelID || threadSessions.has(channelID)));
+        return Boolean(channelID && (channelID === config.channelID || threadSessions.has(channelID) || forumThreads.has(channelID)));
+    }
+
+    function rememberForumThread(channel: DiscordChannel | JsonObject | null | undefined): ForumThreadState | null {
+        if (!config.forumPostsEnabled || !channel) return null;
+        const threadID = stringValue(channel.id);
+        const parentID = stringValue(channel.parent_id);
+        const type = typeof channel.type === "number" ? channel.type : Number(channel.type);
+        if (!threadID || parentID !== config.channelID || type !== DISCORD_PUBLIC_THREAD) return null;
+        const state: ForumThreadState = {
+            threadID,
+            name: stringValue(channel.name),
+            ownerID: stringValue(channel.owner_id),
+            createdAt: Date.now(),
+        };
+        forumThreads.set(threadID, state);
+        if (state.name) threadNames.set(threadID, state.name);
+        return state;
+    }
+
+    function forumThreadForMessage(message: DiscordMessage): ForumThreadState | null {
+        const fromMessage = rememberForumThread(message.thread || null);
+        if (fromMessage) return fromMessage;
+        const channelID = stringValue(message.channel_id);
+        return channelID ? forumThreads.get(channelID) || null : null;
     }
 
     async function createSessionThread(sessionID: string): Promise<string | null> {
@@ -757,27 +1801,54 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
 
         const promise = (async () => {
             try {
-                const result = await discordFetch(`/channels/${config.channelID}/threads`, {
-                    method: "POST",
-                    body: JSON.stringify({
-                        name: safeThreadName(config.threadNamePrefix, sessionID, sessionTitles.get(sessionID)),
-                        auto_archive_duration: config.threadAutoArchiveMinutes,
-                        type: threadTypeCode(config.threadType),
-                    }),
+                const metadata = await ensureSessionMetadata(sessionID);
+                const name = safeThreadName(config.threadNamePrefix, sessionID, metadata);
+                const appliedTagIDs = await ensureForumTagIDs(sessionForumTagNames(metadata)).catch(async (error: unknown) => {
+                    await log("warn", "Failed to prepare Discord forum tags before thread creation", { sessionID, error: String(error) });
+                    return [] as string[];
                 });
+                const baseBody = {
+                    name,
+                    auto_archive_duration: config.threadAutoArchiveMinutes,
+                    type: threadTypeCode(config.threadType),
+                    ...(appliedTagIDs.length ? { applied_tags: appliedTagIDs } : {}),
+                };
+                let result: unknown;
+                try {
+                    result = await discordFetch(`/channels/${config.channelID}/threads`, {
+                        method: "POST",
+                        body: JSON.stringify(baseBody),
+                    });
+                } catch (error) {
+                    if (!discordRequiresForumStarterMessage(error)) throw error;
+                    result = await discordFetch(`/channels/${config.channelID}/threads`, {
+                        method: "POST",
+                        body: JSON.stringify({
+                            name,
+                            auto_archive_duration: config.threadAutoArchiveMinutes,
+                            ...(appliedTagIDs.length ? { applied_tags: appliedTagIDs } : {}),
+                            message: {
+                                content: `Starting opencode session ${shortSessionID(sessionID)}.`,
+                                allowed_mentions: { parse: [] },
+                            },
+                        }),
+                    });
+                }
                 const thread = asObject(result) || {};
                 const threadID = stringValue(thread.id);
                 if (!threadID) throw new Error("Discord thread creation response did not include an id");
 
-                sessionThreads.set(sessionID, threadID);
-                threadSessions.set(threadID, sessionID);
-                await persistThreadMapping(sessionID, threadID);
+                await bindSessionThread(sessionID, threadID, name);
+                void announceSessionMetadata(sessionID, "Session context", threadID).catch(async (error: unknown) => {
+                    await log("warn", "Failed to announce new Discord session thread metadata", { sessionID, threadID, error: String(error) });
+                });
                 return threadID;
             } catch (error) {
                 if (!threadFailures.has(sessionID)) {
                     threadFailures.add(sessionID);
-                    await log("warn", "Failed to create Discord session thread; falling back to control channel", {
+                    await log("warn", "Failed to create Discord session thread", {
                         sessionID,
+                        fallback: controlChannelCanReceiveMessages === false || configuredChannelHasForumTags === true ? "disabled" : "control channel",
                         error: String(error),
                     });
                 }
@@ -791,32 +1862,69 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         return await promise;
     }
 
-    async function targetChannelID(target: DiscordTarget): Promise<string> {
-        if (target.channelID) return target.channelID;
-        if (!config.threadsEnabled || !target.sessionID) return config.channelID;
-        return (await createSessionThread(target.sessionID)) || config.channelID;
+    async function controlChannelFallbackID(sessionID: string | null | undefined): Promise<string | null> {
+        if (controlChannelCanReceiveMessages === false || configuredChannelHasForumTags === true) {
+            const warningKey = sessionID || "control";
+            if (!controlFallbackWarnings.has(warningKey)) {
+                controlFallbackWarnings.add(warningKey);
+                await log("warn", "Skipping Discord control-channel fallback because the configured channel cannot receive normal messages", {
+                    sessionID: sessionID || "none",
+                    channelID: config.channelID,
+                });
+            }
+            return null;
+        }
+        return config.channelID;
     }
 
-    async function sendDiscordMessage(content: string, target: DiscordTarget = {}): Promise<void> {
-        if (!content.trim()) return;
+    async function targetChannelID(target: DiscordTarget): Promise<string | null> {
+        if (target.channelID) return target.channelID;
+        if (!config.threadsEnabled || !target.sessionID) return await controlChannelFallbackID(target.sessionID);
+        const threadID = await createSessionThread(target.sessionID);
+        if (threadID) return threadID;
+        return await controlChannelFallbackID(target.sessionID);
+    }
+
+    function normaliseOutboundMessage(message: string | DiscordOutboundMessage): DiscordOutboundMessage {
+        return typeof message === "string" ? textMessage(message) : message;
+    }
+
+    async function sendDiscordMessage(message: string | DiscordOutboundMessage, target: DiscordTarget = {}): Promise<void> {
+        const outbound = normaliseOutboundMessage(message);
+        const content = outbound.content || "";
+        if (!content.trim() && !outbound.embeds?.length) return;
 
         const channelID = await targetChannelID(target);
+        if (!channelID) return;
+        const chunks = content.trim() ? splitDiscordContent(content, config.maxMessageChars) : [""];
 
-        for (const chunk of splitDiscordContent(content, config.maxMessageChars)) {
-            await discordFetch(`/channels/${channelID}/messages`, {
-                method: "POST",
-                body: JSON.stringify({
-                    content: chunk,
-                    allowed_mentions: { parse: [] },
-                }),
-            });
+        for (const [index, chunk] of chunks.entries()) {
+            let result: unknown;
+            try {
+                result = await discordFetch(`/channels/${channelID}/messages`, {
+                    method: "POST",
+                    body: JSON.stringify({
+                        content: chunk || undefined,
+                        embeds: index === 0 ? outbound.embeds : undefined,
+                        allowed_mentions: { parse: [] },
+                    }),
+                });
+            } catch (error) {
+                if (channelID === config.channelID && discordCannotSendToChannel(error)) {
+                    controlChannelCanReceiveMessages = false;
+                }
+                throw error;
+            }
+            if (shouldRememberSessionMessage(target.sessionID, channelID)) {
+                rememberLastSessionMessage(target.sessionID, channelID, stringValue(asObject(result)?.id));
+            }
         }
     }
 
-    function enqueueDiscordMessage(content: string, target: DiscordTarget = {}): Promise<void> {
+    function enqueueDiscordMessage(message: string | DiscordOutboundMessage, target: DiscordTarget = {}): Promise<void> {
         sendQueue = sendQueue
             .then(async () => {
-                await sendDiscordMessage(content, target);
+                await sendDiscordMessage(message, target);
                 await sleep(config.sendDelayMs);
             })
             .catch(async (error: unknown) => {
@@ -825,12 +1933,44 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         return sendQueue;
     }
 
-    function relay(content: string, sessionID?: string | null): void {
-        void enqueueDiscordMessage(content, { sessionID });
+    function relay(message: string | DiscordOutboundMessage, sessionID?: string | null): void {
+        void enqueueDiscordMessage(message, { sessionID });
     }
 
-    function replyToCommand(context: CommandContext, content: string, sessionID?: string | null): void {
-        void enqueueDiscordMessage(content, { channelID: context.sourceChannelID || null, sessionID });
+    function replyToCommand(context: CommandContext, message: string | DiscordOutboundMessage, sessionID?: string | null): void {
+        void enqueueDiscordMessage(message, { channelID: context.sourceChannelID || null, sessionID });
+    }
+
+    async function syncSessionThreadMetadata(sessionID: string, channelID?: string | null): Promise<{ metadata: SessionMetadata; threadID: string } | null> {
+        const metadata = await ensureSessionMetadata(sessionID);
+        const signature = metadataSignature(metadata);
+        const threadID = channelID || sessionThreads.get(sessionID) || null;
+        if (!threadID) return null;
+
+        const key = `${sessionID}:${threadID}`;
+        if (syncedMetadataSignatures.get(key) === signature) return { metadata, threadID };
+        syncedMetadataSignatures.set(key, signature);
+
+        const name = safeThreadName(config.threadNamePrefix, sessionID, metadata);
+        await renameDiscordThread(threadID, name).catch(async (error: unknown) => {
+            await log("warn", "Failed to rename Discord session thread", { sessionID, threadID, name, error: String(error) });
+        });
+        await applyForumTagsToThread(sessionID, threadID).catch(async (error: unknown) => {
+            await log("warn", "Failed to apply Discord forum tags", { sessionID, threadID, error: String(error) });
+        });
+
+        return { metadata, threadID };
+    }
+
+    async function announceSessionMetadata(sessionID: string, title = "Session context", channelID?: string | null): Promise<void> {
+        const synced = await syncSessionThreadMetadata(sessionID, channelID);
+        if (!synced) return;
+
+        const signature = metadataSignature(synced.metadata);
+        if (!channelID && announcedMetadataSignatures.get(sessionID) === signature) return;
+        announcedMetadataSignatures.set(sessionID, signature);
+
+        await enqueueDiscordMessage(embedMessage(sessionMetadataEmbed(sessionID, title)), { channelID: synced.threadID, sessionID });
     }
 
     function isSessionIgnored(sessionID: string | null): boolean {
@@ -842,35 +1982,49 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         if (!activeSessionID && config.autoAttachLatest) {
             activeSessionID = sessionID;
             activeSessionLocked = false;
-            relay(`**attached** \`${shortSessionID(sessionID)}\` from first opencode event.`, sessionID);
+            void markRuntimeState();
+            relay(
+                embedMessage(
+                    makeEmbed({
+                        title: "Session attached",
+                        description: "Attached from the first opencode event.",
+                        color: EMBED_COLOR.success,
+                        sessionID,
+                    }),
+                ),
+                sessionID,
+            );
             return true;
         }
         return activeSessionID === sessionID;
     }
 
-    async function createSession(title: string): Promise<string | null> {
-        const result = await opencode.session?.create?.({
-            body: { title },
-            query: { directory },
-        });
+    async function createSession(title: string, targetDirectory = directory): Promise<string | null> {
+        const result = await callSessionCreate(title, targetDirectory);
         const sessionID = extractSessionID(result);
         if (sessionID) {
             activeSessionID = sessionID;
             activeSessionLocked = true;
-            sessionTitles.set(sessionID, title);
+            const branch = await refreshBranch(targetDirectory);
+            rememberSessionMetadata(sessionID, {
+                title,
+                directory: targetDirectory,
+                branch,
+            });
+            void markRuntimeState();
         }
         return sessionID;
     }
 
     async function latestSessionID(): Promise<string | null> {
-        const result = await opencode.session?.list?.({ query: { directory } });
+        const result = await callSessionList(directory);
         const data = unwrapData(result);
         const sessions = asArray(data);
         for (const session of sessions) {
             const object = asObject(session);
             const id = stringValue(object?.id) || stringValue(object?.sessionID);
             const title = stringValue(object?.title) || "";
-            if (id) sessionTitles.set(id, title || "untitled");
+            if (id) rememberSessionObject(object, id);
             if (id && !config.ignoredSessionTitleRe.test(title)) return id;
         }
         return null;
@@ -883,10 +2037,143 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         return await createSession("Discord Remote Control");
     }
 
+    async function classifyForumPost(threadTitle: string, prompt: string): Promise<ForumIntakePlan> {
+        if (!opencode.session?.create || !opencode.session?.prompt) {
+            await log("warn", "Forum intake classifier skipped because the synchronous OpenCode prompt API is unavailable");
+            return normaliseForumIntakePlan(null, threadTitle, prompt, directory);
+        }
+
+        let classifierSessionID: string | null = null;
+        try {
+            const classifier = await callSessionCreate(CLASSIFIER_SESSION_TITLE, directory);
+            classifierSessionID = extractSessionID(classifier);
+            if (classifierSessionID) {
+                ignoredSessions.add(classifierSessionID);
+                rememberSessionMetadata(classifierSessionID, {
+                    title: CLASSIFIER_SESSION_TITLE,
+                    directory,
+                    branch: currentBranch,
+                });
+            }
+            if (!classifierSessionID) return normaliseForumIntakePlan(null, threadTitle, prompt, directory);
+
+            const schema = {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                    title: { type: "string" },
+                    directory: { type: ["string", "null"] },
+                    providerID: { type: ["string", "null"] },
+                    modelID: { type: ["string", "null"] },
+                    variant: { type: ["string", "null"] },
+                    prompt: { type: "string" },
+                },
+                required: ["title", "directory", "providerID", "modelID", "variant", "prompt"],
+            };
+            const intakePrompt = [
+                "Classify this Discord forum post into an OpenCode session launch plan.",
+                "Return only JSON that matches the provided schema.",
+                `Current OpenCode directory: ${directory}`,
+                "Rules:",
+                "- Choose directory by inspecting local files when the post names a repo, project, context, folder, or path.",
+                "- Use an absolute directory path. Use null only when the current directory is the right target or the target is unclear.",
+                "- providerID/modelID/variant should be null unless the post explicitly asks for a model or variant.",
+                "- Keep prompt as the user's actual request, cleaned only enough to remove routing metadata.",
+                "- Keep title short and specific.",
+                "",
+                `Forum post title: ${threadTitle || "untitled"}`,
+                "Forum post body:",
+                prompt,
+            ].join("\n");
+
+            const result = await callSessionPrompt("prompt", classifierSessionID, directory, {
+                tools: INTAKE_CLASSIFIER_TOOLS,
+                system: "You classify Discord forum posts into OpenCode session launch metadata. You may inspect local files, but you must not modify anything.",
+                format: { type: "json_schema", schema, retryCount: 2 },
+                parts: [{ type: "text", text: intakePrompt }],
+            });
+            return normaliseForumIntakePlan(extractStructuredObject(result), threadTitle, prompt, directory);
+        } catch (error) {
+            await log("warn", "Forum intake classifier failed; falling back to current OpenCode directory", { error: String(error) });
+            return normaliseForumIntakePlan(null, threadTitle, prompt, directory);
+        } finally {
+            if (classifierSessionID) {
+                ignoredSessions.add(classifierSessionID);
+                void callSessionDelete(classifierSessionID, directory).catch(async (error: unknown) => {
+                    await log("debug", "Failed to delete forum intake classifier session", { classifierSessionID, error: String(error) });
+                });
+            }
+        }
+    }
+
+    async function createForumSessionFromPost(message: DiscordMessage, thread: ForumThreadState): Promise<void> {
+        if (forumIntakes.has(thread.threadID) || threadSessions.has(thread.threadID)) return;
+        forumIntakes.add(thread.threadID);
+
+        const postBody = (message.content || "").trim();
+        if (!postBody) {
+            forumIntakes.delete(thread.threadID);
+            await enqueueDiscordMessage(
+                embedMessage(makeEmbed({ title: `${ICON.warning} Empty forum post`, description: "Add a prompt in the first post body.", color: EMBED_COLOR.warning })),
+                { channelID: thread.threadID },
+            );
+            return;
+        }
+
+        await enqueueDiscordMessage(
+            textMessage(transcriptLine("creating opencode session", "reading post and resolving folder/model metadata")),
+            { channelID: thread.threadID },
+        );
+
+        const plan = await classifyForumPost(thread.name || "Discord forum session", postBody);
+        const targetDirectory = plan.directory || directory;
+        const sessionID = await createSession(plan.title, targetDirectory);
+        if (!sessionID) {
+            await enqueueDiscordMessage(
+                embedMessage(makeEmbed({ title: `${ICON.error} Failed to create OpenCode session`, color: EMBED_COLOR.error })),
+                { channelID: thread.threadID },
+            );
+            return;
+        }
+
+        const branch = await refreshBranch(targetDirectory);
+        rememberSessionMetadata(sessionID, {
+            title: plan.title,
+            directory: targetDirectory,
+            branch,
+            model: plan.model,
+        });
+        activeSessionID = sessionID;
+        activeSessionLocked = true;
+        await bindSessionThread(sessionID, thread.threadID, thread.name);
+        await markRuntimeState();
+        await announceSessionMetadata(sessionID, "Session created", thread.threadID);
+
+        const promptBody: JsonObject = {
+            parts: [{ type: "text", text: plan.prompt }],
+        };
+        if (config.agent) promptBody.agent = config.agent;
+        if (plan.model) {
+            promptBody.model = { providerID: plan.model.providerID, modelID: plan.model.modelID };
+            if (plan.model.variant) promptBody.variant = plan.model.variant;
+        }
+
+        await callSessionPrompt("promptAsync", sessionID, targetDirectory, promptBody);
+    }
+
     async function promptActiveSession(prompt: string, context: CommandContext): Promise<void> {
         const sessionID = await ensureActiveSession(context.sourceSessionID);
         if (!sessionID) {
-            replyToCommand(context, `No active session. Use \`${config.prefix} attach latest\` or \`${config.prefix} new <title>\` first.`);
+            replyToCommand(
+                context,
+                embedMessage(
+                    makeEmbed({
+                        title: `${ICON.warning} No active session`,
+                        description: `Use \`${config.prefix} attach latest\` or \`${config.prefix} new <title>\` first.`,
+                        color: EMBED_COLOR.warning,
+                    }),
+                ),
+            );
             return;
         }
 
@@ -894,27 +2181,31 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             parts: [{ type: "text", text: prompt }],
         };
         if (config.agent) body.agent = config.agent;
+        const metadata = metadataForSession(sessionID);
+        if (metadata.model) {
+            body.model = { providerID: metadata.model.providerID, modelID: metadata.model.modelID };
+            if (metadata.model.variant) body.variant = metadata.model.variant;
+        }
 
-        await opencode.session?.promptAsync?.({
-            path: { id: sessionID },
-            body,
-            query: { directory },
-        });
+        await callSessionPrompt("promptAsync", sessionID, metadata.directory || directory, body);
 
-        replyToCommand(context, `**prompt queued** \`${shortSessionID(sessionID)}\``, sessionID);
+        try {
+            if (await reactToCommandSource(context, REACTION.done)) return;
+        } catch (error) {
+            await log("debug", "Failed to react to Discord prompt source", { sessionID, error: String(error) });
+        }
+        if (context.silentAck) return;
+        replyToCommand(context, textMessage(transcriptLine("queued", shortSessionID(sessionID))), sessionID);
     }
 
     async function abortActiveSession(context: CommandContext): Promise<void> {
         const sessionID = context.sourceSessionID || activeSessionID;
         if (!sessionID) {
-            replyToCommand(context, "No active session to abort.");
+            replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.warning} No active session to abort`, color: EMBED_COLOR.warning })));
             return;
         }
-        await opencode.session?.abort?.({
-            path: { id: sessionID },
-            query: { directory },
-        });
-        replyToCommand(context, `**abort requested** \`${shortSessionID(sessionID)}\``, sessionID);
+        await callSessionAbort(sessionID, metadataForSession(sessionID).directory || directory);
+        replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.warning} Abort requested`, color: EMBED_COLOR.warning, sessionID })), sessionID);
     }
 
     async function replyPermission(requestID: string, reply: PermissionReply, context?: CommandContext): Promise<void> {
@@ -928,59 +2219,96 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
                 query: { directory },
             });
         } else {
-            const message = `Could not reply to permission \`${requestID}\`; opencode permission API was not available.`;
+            const message = embedMessage(
+                makeEmbed({
+                    title: `${ICON.error} Permission reply failed`,
+                    description: `Could not reply to permission \`${requestID}\`; opencode permission API was not available.`,
+                    color: EMBED_COLOR.error,
+                    sessionID: permission?.sessionID,
+                }),
+            );
             if (context) replyToCommand(context, message, permission?.sessionID);
             else relay(message, permission?.sessionID);
             return;
         }
         pendingPermissions.delete(requestID);
-        const message = `**permission ${reply}** \`${requestID}\``;
+        const message = embedMessage(
+            makeEmbed({
+                title: `${reply === "reject" ? ICON.error : ICON.success} Permission ${reply}`,
+                description: `Request \`${requestID}\``,
+                color: reply === "reject" ? EMBED_COLOR.error : EMBED_COLOR.success,
+                sessionID: permission?.sessionID,
+            }),
+        );
         if (context) replyToCommand(context, message, permission?.sessionID);
         else relay(message, permission?.sessionID);
     }
 
     async function listSessions(context: CommandContext): Promise<void> {
-        const result = await opencode.session?.list?.({ query: { directory } });
+        const result = await callSessionList(directory);
         const sessions = asArray(unwrapData(result)).slice(0, 8);
         if (!sessions.length) {
-            replyToCommand(context, "No sessions returned by opencode.");
+            replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.info} No sessions returned`, color: EMBED_COLOR.info })));
             return;
         }
         const rows = sessions.map((session) => {
             const object = asObject(session) || {};
             const id = stringValue(object.id) || stringValue(object.sessionID) || "unknown";
             const title = stringValue(object.title) || "untitled";
-            if (id !== "unknown") sessionTitles.set(id, title);
-            return `- \`${shortSessionID(id)}\` ${title}`;
+            const metadata = id !== "unknown" ? rememberSessionObject(object, id) : null;
+            const model = metadata?.model ? ` ${modelLabel(metadata.model)}` : "";
+            const folder = metadata?.directory ? ` ${formatDirectory(metadata.directory)}` : "";
+            return `\`${shortSessionID(id)}\` ${title}${folder}${model}`;
         });
-        replyToCommand(context, ["**recent sessions**", ...rows].join("\n"));
+        replyToCommand(
+            context,
+            embedMessage(
+                makeEmbed({
+                    title: `${ICON.info} Recent sessions`,
+                    description: rows.join("\n"),
+                    color: EMBED_COLOR.info,
+                }),
+            ),
+        );
     }
 
     async function showStatus(context: CommandContext): Promise<void> {
         let statusText = "unknown";
         try {
-            const result = await opencode.session?.status?.({ query: { directory } });
+            const result = await callSessionStatus(directory);
             statusText = truncate(jsonPreview(unwrapData(result), 700), 700) || "unknown";
         } catch (error) {
             statusText = `status call failed: ${String(error)}`;
         }
 
-        const permissions = [...pendingPermissions.values()]
-            .map((permission) => `- \`${permission.requestID}\` ${permission.title}`)
-            .join("\n");
+        await refreshBranch(directory);
+        const permissions = [...pendingPermissions.values()].map((permission) => `\`${permission.requestID}\` ${permission.title}`).join("\n");
+        const coordinator = coordinatorRuntime();
+        const activeMetadata = activeSessionID ? metadataForSession(activeSessionID) : null;
 
         replyToCommand(
             context,
-            [
-                `**discord bridge status**`,
-                `active session: \`${shortSessionID(activeSessionID)}\`${activeSessionLocked ? " (locked)" : ""}`,
-                `thread session: \`${shortSessionID(context.sourceSessionID)}\``,
-                `bot user: \`${botUserID || "unknown"}\``,
-                `slash command: \`/${config.slashCommand}\`${config.slashCommandsEnabled ? "" : " (disabled)"}`,
-                `session threads: ${config.threadsEnabled ? `${config.threadType} (${sessionThreads.size} known)` : "disabled"}`,
-                `pending permissions:\n${permissions || "none"}`,
-                fenced("json", statusText),
-            ].join("\n"),
+            embedMessage(
+                makeEmbed({
+                    title: `${ICON.info} Discord bridge status`,
+                    color: EMBED_COLOR.info,
+                    fields: [
+                        { name: "Active session", value: `\`${shortSessionID(activeSessionID)}\`${activeSessionLocked ? " locked" : ""}` },
+                        { name: "Folder", value: inlineCode(formatDirectory(activeMetadata?.directory || directory)), inline: false },
+                        { name: "Branch", value: inlineCode(activeMetadata?.branch || currentBranch || "unknown") },
+                        { name: "Model/variant", value: inlineCode(modelLabel(activeMetadata?.model)), inline: false },
+                        { name: "Thread session", value: `\`${shortSessionID(context.sourceSessionID)}\`` },
+                        { name: "Bot user", value: `\`${botUserID || "unknown"}\`` },
+                        { name: "Slash command", value: `\`/${config.slashCommand}\`${config.slashCommandsEnabled ? "" : " disabled"}` },
+                        { name: "Session threads", value: config.threadsEnabled ? `${config.threadType} (${sessionThreads.size} known)` : "disabled" },
+                        { name: "Forum posts", value: config.forumPostsEnabled ? `${forumThreads.size} observed` : "disabled" },
+                        { name: "Connected sessions", value: String(connectedSessionCount()) },
+                        { name: "Coordinator", value: coordinator ? `pid ${coordinator.pid}` : "none" },
+                        { name: "Pending permissions", value: permissions || "none", inline: false },
+                        { name: "OpenCode status", value: fenced("json", statusText), inline: false },
+                    ],
+                }),
+            ),
         );
     }
 
@@ -990,6 +2318,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             `Slash: \`/${config.slashCommand}\`${config.slashCommandsEnabled ? "" : " (disabled)"}`,
             `Prefix: \`${config.prefix}\``,
             `Session threads: ${config.threadsEnabled ? `${config.threadType} threads` : "disabled"}`,
+            `Forum posts: ${config.forumPostsEnabled ? "new posts create sessions" : "disabled"}`,
             `- \`/${config.slashCommand} status\` or \`${config.prefix} status\` - show active session and pending permissions`,
             `- \`/${config.slashCommand} sessions\` or \`${config.prefix} sessions\` - list recent sessions`,
             `- \`/${config.slashCommand} attach [session_id]\` or \`${config.prefix} attach <session-id>\` - select a session`,
@@ -1011,7 +2340,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         });
 
         if (command === "help") {
-            replyToCommand(context, helpText());
+            replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.info} OpenCode Discord remote control`, description: helpText(), color: EMBED_COLOR.info })));
             return;
         }
         if (command === "status") {
@@ -1026,28 +2355,75 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             const target = rest.trim();
             const sessionID = target === "latest" || !target ? await latestSessionID() : target;
             if (!sessionID) {
-                replyToCommand(context, "Could not find a session to attach.");
+                replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.warning} Could not find a session to attach`, color: EMBED_COLOR.warning })));
                 return;
             }
             activeSessionID = sessionID;
             activeSessionLocked = true;
-            replyToCommand(context, `**attached** \`${shortSessionID(sessionID)}\``, sessionID);
+            const metadata = await ensureSessionMetadata(sessionID);
+            void markRuntimeState();
+            replyToCommand(
+                context,
+                embedMessage(
+                    makeEmbed({
+                        title: "Session attached",
+                        color: EMBED_COLOR.success,
+                        fields: sessionMetadataFields(metadata),
+                        sessionID,
+                    }),
+                ),
+                sessionID,
+            );
+            void announceSessionMetadata(sessionID, "Session context").catch(async (error: unknown) => {
+                await log("warn", "Failed to announce attached session metadata", { sessionID, error: String(error) });
+            });
             return;
         }
         if (command === "unlock") {
             activeSessionLocked = false;
-            replyToCommand(context, `**auto attach unlocked** current \`${shortSessionID(activeSessionID)}\``);
+            replyToCommand(
+                context,
+                embedMessage(
+                    makeEmbed({
+                        title: `${ICON.success} Auto attach unlocked`,
+                        description: `Current session: \`${shortSessionID(activeSessionID)}\``,
+                        color: EMBED_COLOR.success,
+                    }),
+                ),
+            );
             return;
         }
         if (command === "new") {
             const title = rest || "Discord Remote Control";
             const sessionID = await createSession(title);
-            replyToCommand(context, sessionID ? `**created session** \`${shortSessionID(sessionID)}\` ${title}` : "Failed to create session.", sessionID);
+            const metadata = sessionID ? metadataForSession(sessionID) : null;
+            replyToCommand(
+                context,
+                embedMessage(
+                    makeEmbed({
+                        title: sessionID ? `${ICON.success} Created session` : `${ICON.error} Failed to create session`,
+                        description: title,
+                        color: sessionID ? EMBED_COLOR.success : EMBED_COLOR.error,
+                        fields: metadata ? sessionMetadataFields(metadata) : undefined,
+                        sessionID,
+                    }),
+                ),
+                sessionID,
+            );
             return;
         }
         if (command === "prompt" || command === "reply") {
             if (!rest) {
-                replyToCommand(context, `Usage: \`${config.prefix} ${command} <text>\` or \`/${config.slashCommand} ${command} text:<text>\`.`);
+                replyToCommand(
+                    context,
+                    embedMessage(
+                        makeEmbed({
+                            title: `${ICON.info} Prompt usage`,
+                            description: `Use \`${config.prefix} ${command} <text>\`, \`/${config.slashCommand} ${command} text:<text>\`, or type directly in a session thread.`,
+                            color: EMBED_COLOR.info,
+                        }),
+                    ),
+                );
                 return;
             }
             await promptActiveSession(rest, context);
@@ -1060,7 +2436,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         if (["allow", "always", "deny", "reject"].includes(command)) {
             const requestID = rest || [...pendingPermissions.keys()][0] || "";
             if (!requestID) {
-                replyToCommand(context, "No pending permission request found.");
+                replyToCommand(context, embedMessage(makeEmbed({ title: `${ICON.info} No pending permission request`, color: EMBED_COLOR.info })));
                 return;
             }
             const reply = command === "always" ? "always" : command === "allow" ? "once" : "reject";
@@ -1068,14 +2444,36 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             return;
         }
 
-        replyToCommand(context, `Unknown command \`${command}\`. Use \`${config.prefix} help\` or \`/${config.slashCommand} help\`.`);
+        replyToCommand(
+            context,
+            embedMessage(
+                makeEmbed({
+                    title: `${ICON.warning} Unknown command`,
+                    description: `Unknown command \`${command}\`. Use \`${config.prefix} help\` or \`/${config.slashCommand} help\`.`,
+                    color: EMBED_COLOR.warning,
+                }),
+            ),
+        );
     }
 
     async function handleDiscordMessage(message: DiscordMessage): Promise<void> {
-        if (!isAllowedDiscordChannel(message.channel_id)) return;
+        const pendingForumThread = forumThreadForMessage(message);
+        if (!isAllowedDiscordChannel(message.channel_id) && !pendingForumThread) return;
         if (message.author?.bot) return;
         if (botUserID && message.author?.id === botUserID) return;
         if (!message.author?.id || !config.allowedUserIDs.has(message.author.id)) return;
+
+        if (pendingForumThread && !threadSessions.has(pendingForumThread.threadID)) {
+            await createForumSessionFromPost(message, pendingForumThread);
+            return;
+        }
+
+        const sourceSessionID = sessionIDForDiscordChannel(message.channel_id);
+        if (sourceSessionID) {
+            if (!localOwnsSession(sourceSessionID)) return;
+        } else if (!(await isCoordinatorRuntime())) {
+            return;
+        }
 
         const parsed = parseDiscordRemoteCommand(message.content || "", config.prefix, config.implicitReply);
         if (!parsed) return;
@@ -1083,7 +2481,8 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         try {
             await handleCommand(message, parsed, {
                 sourceChannelID: message.channel_id || null,
-                sourceSessionID: sessionIDForDiscordChannel(message.channel_id),
+                sourceMessageID: message.id || null,
+                sourceSessionID,
             });
         } catch (error) {
             await log("error", "Failed to handle Discord command", { error: String(error) });
@@ -1112,9 +2511,17 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             return;
         }
 
+        const sourceSessionID = sessionIDForDiscordChannel(interaction.channel_id);
+        if (sourceSessionID) {
+            if (!localOwnsSession(sourceSessionID)) return;
+        } else if (!(await isCoordinatorRuntime())) {
+            return;
+        }
+
         const context: CommandContext = {
             sourceChannelID: interaction.channel_id || null,
-            sourceSessionID: sessionIDForDiscordChannel(interaction.channel_id),
+            sourceSessionID,
+            silentAck: true,
         };
 
         await respondInteraction(
@@ -1148,6 +2555,26 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     function sendGateway(payload: DiscordGatewayPayload): void {
         if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
         websocket.send(JSON.stringify(payload));
+    }
+
+    function sendPresence(): void {
+        if (!config.presenceEnabled) return;
+        const count = connectedSessionCount();
+        const noun = count === 1 ? "session" : "sessions";
+        sendGateway({
+            op: 3,
+            d: {
+                since: null,
+                activities: [
+                    {
+                        name: `${count} opencode ${noun}`,
+                        type: 3,
+                    },
+                ],
+                status: count > 0 ? "online" : "idle",
+                afk: false,
+            },
+        });
     }
 
     function sendHeartbeat(): void {
@@ -1254,23 +2681,36 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             if (applicationID) {
                 void registerSlashCommand(applicationID).catch(async (error: unknown) => {
                     await log("warn", "Failed to register Discord slash command", { error: String(error) });
-                    relay(`Discord slash command registration failed: ${String(error)}`);
+                    relay(
+                        embedMessage(
+                            makeEmbed({
+                                title: `${ICON.warning} Slash command registration failed`,
+                                description: String(error),
+                                color: EMBED_COLOR.warning,
+                            }),
+                        ),
+                    );
                 });
             } else if (config.slashCommandsEnabled && config.registerSlashCommands) {
                 await log("warn", "Discord slash command registration skipped because application ID is unknown");
             }
-            relay(`**Discord bridge connected** bot \`${botUserID || "unknown"}\`, active \`${shortSessionID(activeSessionID)}\`.`);
+            await markRuntimeState();
             return;
         }
 
         if (payload.t === "RESUMED") {
             reconnectAttempts = 0;
-            relay("**Discord bridge resumed**");
+            await markRuntimeState();
             return;
         }
 
         if (payload.t === "MESSAGE_CREATE") {
             await handleDiscordMessage((asObject(payload.d) || {}) as DiscordMessage);
+            return;
+        }
+
+        if (payload.t === "THREAD_CREATE") {
+            rememberForumThread((asObject(payload.d) || {}) as DiscordChannel);
             return;
         }
 
@@ -1337,9 +2777,9 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         if (!buffer) return;
         if (buffer.timer) clearTimeout(buffer.timer);
         streamBuffers.delete(key);
-        const text = buffer.text.trim();
+        const text = stripSystemReminders(buffer.text);
         if (!text) return;
-        relay(`**${buffer.kind}** \`${shortSessionID(buffer.sessionID)}\`\n${text}`, buffer.sessionID);
+        relay(transcriptStreamMessage(buffer.kind, text), buffer.sessionID);
     }
 
     function bufferStream(sessionID: string, partID: string, kind: "assistant" | "thinking", delta: string): void {
@@ -1363,15 +2803,44 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         const sessionID = sessionIDFromEvent(event);
         if (!sessionID) return;
         const title = titleFromEvent(event) || "untitled";
-        sessionTitles.set(sessionID, title);
+        const properties = asObject(event.properties) || {};
+        rememberSessionObject(asObject(properties.info), sessionID);
+        rememberSessionMetadata(sessionID, { title });
         if (config.ignoredSessionTitleRe.test(title)) {
             ignoredSessions.add(sessionID);
             return;
         }
         if (config.autoAttachLatest && !activeSessionLocked) {
             activeSessionID = sessionID;
-            relay(`**attached** \`${shortSessionID(sessionID)}\` ${title}`, sessionID);
+            void markRuntimeState();
+            relay(
+                embedMessage(
+                    makeEmbed({
+                        title: "Session attached",
+                        description: title,
+                        color: EMBED_COLOR.success,
+                        sessionID,
+                    }),
+                ),
+                sessionID,
+            );
         }
+    }
+
+    function handleSessionUpdated(event: JsonObject): void {
+        const sessionID = sessionIDFromEvent(event);
+        if (!sessionID) return;
+        const properties = asObject(event.properties) || {};
+        const metadata = rememberSessionObject(asObject(properties.info), sessionID) || metadataForSession(sessionID);
+        const title = metadata.title || titleFromEvent(event) || "untitled";
+        if (config.ignoredSessionTitleRe.test(title)) {
+            ignoredSessions.add(sessionID);
+            return;
+        }
+        if (!shouldRelaySession(sessionID)) return;
+        void syncSessionThreadMetadata(sessionID).catch(async (error: unknown) => {
+            await log("warn", "Failed to sync updated session metadata", { sessionID, error: String(error) });
+        });
     }
 
     function handlePermissionEvent(event: JsonObject): void {
@@ -1387,7 +2856,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         const title = stringValue(properties.title) || stringValue(properties.permission) || "Permission request";
         const permission = { requestID, sessionID, title, patterns };
         pendingPermissions.set(requestID, permission);
-        relay(formatPermission(permission, config.prefix, config.slashCommand), sessionID);
+        relay(embedMessage(formatPermissionEmbed(permission, config.prefix, config.slashCommand)), sessionID);
     }
 
     function handlePartUpdated(event: JsonObject): void {
@@ -1401,44 +2870,64 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         const type = stringValue(part.type);
         const partID = stringValue(part.id) || "part";
         if (type === "text") {
-            bufferStream(sessionID, partID, "assistant", getPartDelta(part, properties, textProgress));
+            bufferStream(sessionID, partID, "assistant", getPartDelta(sessionID, partID, "assistant", part, properties, textProgress));
             return;
         }
         if (type === "reasoning" && config.includeReasoning) {
-            bufferStream(sessionID, partID, "thinking", getPartDelta(part, properties, textProgress));
+            bufferStream(sessionID, partID, "thinking", getPartDelta(sessionID, partID, "thinking", part, properties, textProgress));
             return;
         }
         if (type === "step-start") {
-            relay(`**step start** \`${shortSessionID(sessionID)}\``, sessionID);
+            relayReaction(REACTION.step, sessionID);
             return;
         }
         if (type === "step-finish") {
-            const reason = stringValue(part.reason) || "done";
-            relay(`**step finish** \`${shortSessionID(sessionID)}\` ${reason}`, sessionID);
+            relayReaction(REACTION.done, sessionID);
             return;
         }
         if (type === "patch") {
             const files = asArray(part.files).map((file) => `- ${String(file)}`).join("\n");
-            relay(`**patch** \`${shortSessionID(sessionID)}\`\n${files || "no files"}`, sessionID);
+            relay(embedMessage(makeEmbed({ title: `${ICON.patch} Patch`, description: files || "no files", color: EMBED_COLOR.info, sessionID })), sessionID);
             return;
         }
         if (type === "agent") {
             const name = stringValue(part.name) || "agent";
-            relay(`**agent** \`${shortSessionID(sessionID)}\` ${name}`, sessionID);
+            relay(embedMessage(makeEmbed({ title: `${ICON.agent} Agent`, description: name, color: EMBED_COLOR.info, sessionID })), sessionID);
+            return;
+        }
+        if (type === "compaction") {
+            relayReaction(REACTION.status, sessionID);
+            return;
         }
     }
 
     function handlePartDelta(event: JsonObject): void {
+        // OpenCode delta events do not include the part type, so a reasoning
+        // delta can look like normal text until the matching part update arrives.
+        // Relay from message.part.updated instead; it has the part type and the
+        // progress tracker still emits only the unseen suffix.
+    }
+
+    function rememberMessageMetadata(sessionID: string, message: JsonObject): void {
+        const model = modelFromMessage(message);
+        const path = asObject(message.path);
+        const cwd = stringValue(path?.cwd) || stringValue(path?.root);
+        rememberSessionMetadata(sessionID, {
+            directory: cwd || metadataForSession(sessionID).directory || directory,
+            model: model || metadataForSession(sessionID).model,
+        });
+    }
+
+    function handleMessageUpdated(event: JsonObject): void {
         const properties = asObject(event.properties) || {};
         const sessionID = stringValue(properties.sessionID) || stringValue(properties.sessionId);
-        if (!sessionID || !shouldRelaySession(sessionID)) return;
-
-        const partID = stringValue(properties.partID) || stringValue(properties.partId) || "part";
-        const field = stringValue(properties.field) || "text";
-        const delta = stringValue(properties.delta) || "";
-        const kind = field.toLowerCase().includes("reason") ? "thinking" : "assistant";
-        if (kind === "thinking" && !config.includeReasoning) return;
-        bufferStream(sessionID, partID, kind, delta);
+        const info = asObject(properties.info);
+        if (!sessionID || !info) return;
+        rememberMessageMetadata(sessionID, info);
+        if (!shouldRelaySession(sessionID)) return;
+        void syncSessionThreadMetadata(sessionID).catch(async (error: unknown) => {
+            await log("warn", "Failed to sync message metadata", { sessionID, error: String(error) });
+        });
     }
 
     function handleSessionEvent(event: JsonObject): void {
@@ -1447,27 +2936,36 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         const type = stringValue(event.type) || "event";
         if (type === "session.idle") {
             flushSessionBuffers(sessionID);
-            relay(`**idle** \`${shortSessionID(sessionID)}\``, sessionID);
+            relayReaction(REACTION.idle, sessionID);
             return;
         }
         if (type === "session.error") {
-            relay(`**session error** \`${shortSessionID(sessionID)}\`\n${fenced("json", jsonPreview(asObject(event.properties) || {}, 1200))}`, sessionID);
+            relay(
+                embedMessage(
+                    makeEmbed({
+                        title: "Session error",
+                        description: fenced("json", jsonPreview(asObject(event.properties) || {}, 1200)),
+                        color: EMBED_COLOR.error,
+                        sessionID,
+                    }),
+                ),
+                sessionID,
+            );
             return;
         }
         if (type === "session.status") {
-            const status = asObject(asObject(event.properties)?.status) || asObject(event.properties) || {};
-            relay(`**status** \`${shortSessionID(sessionID)}\` ${jsonPreview(status, 500)}`, sessionID);
+            relayReaction(REACTION.status, sessionID);
             return;
         }
         if (type === "session.compacted") {
-            relay(`**compacted** \`${shortSessionID(sessionID)}\``, sessionID);
+            relayReaction(REACTION.status, sessionID);
         }
     }
 
     function handleTodoUpdated(event: JsonObject): void {
         const sessionID = sessionIDFromEvent(event);
         if (!shouldRelaySession(sessionID)) return;
-        relay(`**todo updated** \`${shortSessionID(sessionID)}\`\n${fenced("json", jsonPreview(asObject(event.properties) || {}, 1200))}`, sessionID);
+        relayReaction(REACTION.todo, sessionID);
     }
 
     await log("info", "Plugin initialised", {
@@ -1477,6 +2975,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
         initialSessionID: activeSessionID || "none",
         slashCommand: config.slashCommandsEnabled ? `/${config.slashCommand}` : "disabled",
         threadsEnabled: config.threadsEnabled,
+        forumPostsEnabled: config.forumPostsEnabled,
     });
 
     if (!config.enabled) {
@@ -1485,6 +2984,16 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     }
 
     await loadPersistentState();
+    await markRuntimeState(false);
+    presenceTimer = setInterval(() => {
+        void markRuntimeState().catch(async (error: unknown) => {
+            await log("warn", "Failed to refresh Discord runtime presence", { error: String(error) });
+        });
+    }, config.presenceUpdateMs);
+    process.once("beforeExit", () => {
+        if (presenceTimer) clearInterval(presenceTimer);
+        void removeRuntimeState().catch(() => undefined);
+    });
 
     if (config.allowedUserIDs.size === 0) {
         await log("warn", "Discord inbound control disabled because OPENCODE_DISCORD_ALLOWED_USER_IDS is empty");
@@ -1497,7 +3006,7 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
     void toast("Discord bridge starting", `Channel ${config.channelID}; active ${shortSessionID(activeSessionID)}.`, "info");
 
     return {
-        event: async ({ event }) => {
+        event: async ({ event }: PluginEventInput) => {
             const object = event as JsonObject;
             const type = stringValue(object.type);
             if (!type) return;
@@ -1506,8 +3015,16 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
                 handleSessionCreated(object);
                 return;
             }
+            if (type === "session.updated") {
+                handleSessionUpdated(object);
+                return;
+            }
             if (type === "message.part.updated") {
                 handlePartUpdated(object);
+                return;
+            }
+            if (type === "message.updated") {
+                handleMessageUpdated(object);
                 return;
             }
             if (type === "message.part.delta") {
@@ -1533,24 +3050,39 @@ export const DiscordRemoteControl: Plugin = async ({ client, directory }, option
             }
         },
 
-        "tool.execute.before": async (input, output) => {
-            const sessionID = input.sessionID;
+        "chat.message": async (input: ChatMessageHookInput) => {
+            const sessionID = stringValue(input.sessionID);
+            if (!sessionID) return;
+            rememberModelMetadata(sessionID, modelFromValue(input.model, input.variant));
             if (!shouldRelaySession(sessionID)) return;
-            const callID = input.callID;
+            await syncSessionThreadMetadata(sessionID).catch(async (error: unknown) => {
+                await log("warn", "Failed to sync chat model metadata", { sessionID, error: String(error) });
+            });
+        },
+
+        "tool.execute.before": async (input: ToolExecuteHookInput) => {
+            const sessionID = stringValue(input.sessionID);
+            if (!shouldRelaySession(sessionID)) return;
+            const callID = stringValue(input.callID) || "unknown";
             const key = `${sessionID}:${callID}:before`;
             if (seenToolStates.has(key)) return;
             seenToolStates.add(key);
-            relay(formatToolStart(input.tool, sessionID, callID, output.args, config.maxToolOutputChars), sessionID);
         },
 
-        "tool.execute.after": async (input, output) => {
-            const sessionID = input.sessionID;
+        "tool.execute.after": async (input: ToolExecuteHookInput, output: unknown) => {
+            const sessionID = stringValue(input.sessionID);
             if (!shouldRelaySession(sessionID)) return;
-            const callID = input.callID;
+            const callID = stringValue(input.callID) || "unknown";
+            const tool = stringValue(input.tool) || "tool";
             const key = `${sessionID}:${callID}:after`;
             if (seenToolStates.has(key)) return;
             seenToolStates.add(key);
-            relay(formatToolDone(input.tool, sessionID, callID, output as JsonObject, config.maxToolOutputChars, config.includeToolOutput), sessionID);
+            const result = output as JsonObject;
+            const failed = toolOutputFailed(result);
+            if (!failed && !isImportantTool(tool)) return;
+            flushSessionBuffers(sessionID);
+            relayReaction(failed ? REACTION.failed : REACTION.done, sessionID);
+            relay(formatToolResultMessage(tool, callID, input.args, result, config.maxToolOutputChars, config.includeToolOutput, failed), sessionID);
         },
     };
 };
