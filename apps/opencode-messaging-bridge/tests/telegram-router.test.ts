@@ -8,7 +8,7 @@ import { type BridgeConfig } from "../src/config.js";
 import { type OpenCodeHealth, type OpenCodeSession } from "../src/opencode.js";
 import { readBridgeState, writeBridgeState, createDefaultBridgeState } from "../src/state.js";
 import { TelegramBridgeRouter } from "../src/telegram-router.js";
-import type { SendChatActionInput, SendMessageInput, TelegramUpdate } from "../src/telegram.js";
+import { TELEGRAM_MARKDOWN_PARSE_MODE, type SendChatActionInput, type SendMessageInput, type SetMessageReactionInput, type TelegramUpdate } from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 
@@ -34,8 +34,20 @@ describe("TelegramBridgeRouter", () => {
         await router.handleUpdate(update("123", "456", "/oc status"));
 
         assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
-            "[bridge] OpenCode healthy: true\n[bridge] OpenCode version: 1.3.17\n[bridge] active session: none",
+            "*\\[bridge\\]* OpenCode healthy: `true`\n*\\[bridge\\]* OpenCode version: `1.3.17`\n*\\[bridge\\]* active session: `none`",
         ]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.parseMode), [TELEGRAM_MARKDOWN_PARSE_MODE]);
+        assert.deepEqual(fixture.telegram.reactions, [{ chatID: "456", messageID: 10, emoji: "\u{1F44D}" }]);
+    });
+
+    it("responds to first-class Telegram command menu commands", async () => {
+        const fixture = await createFixture();
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/status@OpenCodeBridgeBot"));
+
+        assert.equal(fixture.opencode.healthCalls, 1);
+        assert.deepEqual(fixture.telegram.reactions, [{ chatID: "456", messageID: 10, emoji: "\u{1F44D}" }]);
     });
 
     it("lists recent sessions", async () => {
@@ -44,7 +56,7 @@ describe("TelegramBridgeRouter", () => {
 
         await router.handleUpdate(update("123", "456", "/oc sessions"));
 
-        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["ses_abc\tExample"]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["`ses_abc` Example"]);
     });
 
     it("attaches the latest session and persists the binding", async () => {
@@ -57,7 +69,7 @@ describe("TelegramBridgeRouter", () => {
         assert.equal(state.surfaces[0]?.id, "telegram:456:42");
         assert.equal(state.surfaces[0]?.activeSessionID, "ses_abc");
         assert.equal(state.bindings[0]?.sessionID, "ses_abc");
-        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["[bridge] attached ses_abc\tExample"]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* attached `ses_abc` Example"]);
     });
 
     it("creates a session and binds it to the Telegram surface", async () => {
@@ -69,7 +81,7 @@ describe("TelegramBridgeRouter", () => {
         const state = await readBridgeState(fixture.statePath);
         assert.deepEqual(fixture.opencode.createdTitles, ["New work"]);
         assert.equal(state.surfaces[0]?.activeSessionID, "ses_new");
-        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["[bridge] created and attached ses_new\tNew work"]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* created and attached `ses_new` New work"]);
     });
 
     it("sends prompts to the active session", async () => {
@@ -93,13 +105,24 @@ describe("TelegramBridgeRouter", () => {
 
         assert.deepEqual(fixture.telegram.actions, [{ chatID: "456", threadID: null, action: "typing" }]);
         assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "hello there" }]);
-        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["[bridge] prompt sent to ses_abc"]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* prompt sent to `ses_abc`"]);
+    });
+
+    it("keeps reactions best-effort so Telegram reaction errors do not block commands", async () => {
+        const fixture = await createFixture({ failReactions: true });
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "/oc status"));
+
+        assert.equal(fixture.opencode.healthCalls, 1);
+        assert.equal(fixture.telegram.messages.length, 1);
     });
 });
 
 interface FixtureOptions {
     sessions?: OpenCodeSession[];
     createdSession?: OpenCodeSession;
+    failReactions?: boolean;
 }
 
 interface FakeOpenCode {
@@ -117,7 +140,7 @@ interface FakeOpenCode {
 async function createFixture(options: FixtureOptions = {}): Promise<{
     statePath: string;
     dependencies: ConstructorParameters<typeof TelegramBridgeRouter>[0];
-    telegram: { messages: SendMessageInput[]; actions: SendChatActionInput[] };
+    telegram: { messages: SendMessageInput[]; actions: SendChatActionInput[]; reactions: SetMessageReactionInput[] };
     opencode: FakeOpenCode;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-router-test-"));
@@ -126,11 +149,19 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     const telegram = {
         messages: [] as SendMessageInput[],
         actions: [] as SendChatActionInput[],
+        reactions: [] as SetMessageReactionInput[],
         async sendMessage(input: SendMessageInput): Promise<void> {
             telegram.messages.push(input);
         },
         async sendChatAction(input: SendChatActionInput): Promise<void> {
             telegram.actions.push(input);
+        },
+        async setMessageReaction(input: SetMessageReactionInput): Promise<void> {
+            if (options.failReactions) {
+                throw new Error("reaction failed");
+            }
+
+            telegram.reactions.push(input);
         },
     };
     const opencode: FakeOpenCode = {

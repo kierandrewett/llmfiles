@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { TelegramBotApiClient, TelegramBotApiError, chunkTelegramText } from "../src/telegram.js";
+import {
+    TELEGRAM_BRIDGE_BOT_COMMANDS,
+    TELEGRAM_MARKDOWN_PARSE_MODE,
+    TelegramBotApiClient,
+    TelegramBotApiError,
+    chunkTelegramText,
+    escapeTelegramMarkdown,
+} from "../src/telegram.js";
 
 describe("chunkTelegramText", () => {
     it("keeps short messages unchanged", () => {
@@ -58,15 +65,43 @@ describe("TelegramBotApiClient", () => {
     it("sends text messages with optional thread IDs", async () => {
         const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
 
-        await client.sendMessage({ chatID: "123", threadID: "42", text: "hello" });
+        await client.sendMessage({ chatID: "123", threadID: "42", text: "*hello*", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE });
 
         assert.equal(requests[0]?.method, "sendMessage");
         assert.deepEqual(requests[0]?.body, {
             chat_id: "123",
             message_thread_id: 42,
-            text: "hello",
+            text: "*hello*",
+            parse_mode: "MarkdownV2",
             link_preview_options: { is_disabled: true },
         });
+    });
+
+    it("registers the Telegram command menu", async () => {
+        const { client, requests } = createClient([{ ok: true, result: true }]);
+
+        await client.setMyCommands({ commands: TELEGRAM_BRIDGE_BOT_COMMANDS });
+
+        assert.equal(requests[0]?.method, "setMyCommands");
+        assert.deepEqual(requests[0]?.body, { commands: TELEGRAM_BRIDGE_BOT_COMMANDS });
+    });
+
+    it("sets message reactions", async () => {
+        const { client, requests } = createClient([{ ok: true, result: true }]);
+
+        await client.setMessageReaction({ chatID: "123", messageID: 10, emoji: "\u{1F44D}", isBig: true });
+
+        assert.equal(requests[0]?.method, "setMessageReaction");
+        assert.deepEqual(requests[0]?.body, {
+            chat_id: "123",
+            message_id: 10,
+            reaction: [{ type: "emoji", emoji: "\u{1F44D}" }],
+            is_big: true,
+        });
+    });
+
+    it("escapes plain text for Telegram MarkdownV2", () => {
+        assert.equal(escapeTelegramMarkdown("[bridge] value_1: a+b."), "\\[bridge\\] value\\_1: a\\+b\\.");
     });
 
     it("sends typing chat actions", async () => {

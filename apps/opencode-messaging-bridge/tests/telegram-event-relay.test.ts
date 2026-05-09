@@ -7,7 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import { createDefaultBridgeState, writeBridgeState } from "../src/state.js";
 import { TelegramEventRelay } from "../src/telegram-event-relay.js";
 import type { OpenCodeEvent } from "../src/opencode.js";
-import type { SendMessageInput } from "../src/telegram.js";
+import { TELEGRAM_MARKDOWN_PARSE_MODE, type SendMessageInput } from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 
@@ -25,7 +25,7 @@ describe("TelegramEventRelay", () => {
         await relay.flushAll();
 
         assert.deepEqual(fixture.telegram.sent, [
-            { chatID: "456", threadID: null, text: "hello world" },
+            { chatID: "456", threadID: null, text: "hello world", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
         ]);
     });
 
@@ -47,7 +47,19 @@ describe("TelegramEventRelay", () => {
         await relay.handleEvent({ type: "session.idle", properties: { sessionID: "ses_abc" } });
 
         assert.deepEqual(fixture.telegram.sent, [
-            { chatID: "456", threadID: null, text: "hello" },
+            { chatID: "456", threadID: null, text: "hello", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
+        ]);
+    });
+
+    it("escapes relayed text before sending it through Telegram MarkdownV2", async () => {
+        const fixture = await createFixture();
+        const relay = new TelegramEventRelay(fixture.dependencies);
+
+        await relay.handleEvent(textEvent("ses_abc", "part_1", "[bridge] value_1: a+b."));
+        await relay.flushAll();
+
+        assert.deepEqual(fixture.telegram.sent, [
+            { chatID: "456", threadID: null, text: "\\[bridge\\] value\\_1: a\\+b\\.", parseMode: TELEGRAM_MARKDOWN_PARSE_MODE },
         ]);
     });
 });

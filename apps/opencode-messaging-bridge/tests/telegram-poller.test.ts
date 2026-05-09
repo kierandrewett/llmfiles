@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { createDefaultBridgeState, readBridgeState, writeBridgeState } from "../src/state.js";
 import { TelegramBridgePoller } from "../src/telegram-poller.js";
-import type { GetUpdatesOptions, TelegramUpdate } from "../src/telegram.js";
+import { TELEGRAM_BRIDGE_BOT_COMMANDS, type GetUpdatesOptions, type SetMyCommandsInput, type TelegramUpdate } from "../src/telegram.js";
 
 const tempDirs: string[] = [];
 
@@ -29,6 +29,7 @@ describe("TelegramBridgePoller", () => {
         const updatedState = await readBridgeState(fixture.statePath);
 
         assert.equal(processed, 2);
+        assert.deepEqual(fixture.telegram.commands, [{ commands: TELEGRAM_BRIDGE_BOT_COMMANDS }]);
         assert.deepEqual(fixture.telegram.requests, [{ offset: 5, timeoutSeconds: 30, allowedUpdates: ["message"] }]);
         assert.deepEqual(fixture.router.handledUpdateIDs, [5, 6]);
         assert.equal(updatedState.platforms.telegram.updateOffset, 7);
@@ -41,7 +42,18 @@ describe("TelegramBridgePoller", () => {
         await assert.rejects(() => poller.runOnce(), /router failed/);
         const state = await readBridgeState(fixture.statePath);
 
+        assert.deepEqual(fixture.telegram.commands, [{ commands: TELEGRAM_BRIDGE_BOT_COMMANDS }]);
         assert.equal(state.platforms.telegram.updateOffset, null);
+    });
+
+    it("registers Telegram commands only once per poller", async () => {
+        const fixture = await createFixture([]);
+        const poller = new TelegramBridgePoller(fixture.dependencies);
+
+        await poller.runOnce();
+        await poller.runOnce();
+
+        assert.deepEqual(fixture.telegram.commands, [{ commands: TELEGRAM_BRIDGE_BOT_COMMANDS }]);
     });
 });
 
@@ -52,14 +64,18 @@ interface FixtureOptions {
 async function createFixture(updates: TelegramUpdate[], options: FixtureOptions = {}): Promise<{
     statePath: string;
     dependencies: ConstructorParameters<typeof TelegramBridgePoller>[0];
-    telegram: { requests: GetUpdatesOptions[] };
+    telegram: { commands: SetMyCommandsInput[]; requests: GetUpdatesOptions[] };
     router: { handledUpdateIDs: number[] };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-poller-test-"));
     tempDirs.push(dir);
     const statePath = path.join(dir, "state.json");
     const telegram = {
+        commands: [] as SetMyCommandsInput[],
         requests: [] as GetUpdatesOptions[],
+        async setMyCommands(input: SetMyCommandsInput): Promise<void> {
+            telegram.commands.push(input);
+        },
         async getUpdates(request: GetUpdatesOptions): Promise<TelegramUpdate[]> {
             telegram.requests.push(request);
             return updates;
