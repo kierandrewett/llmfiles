@@ -78,7 +78,7 @@ describe("BridgeStateStore", () => {
     it("loads pre-automation state files without scheduled jobs", async () => {
         const dir = await createTempDir();
         const filePath = path.join(dir, "state.json");
-        const legacyState: Record<string, unknown> = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        const legacyState = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z")) as unknown as Record<string, unknown>;
         delete legacyState.jobs;
         await writeFile(filePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
 
