@@ -4,6 +4,9 @@ const DEFAULT_OPENCODE_COMMAND = "opencode";
 const DEFAULT_OPENCODE_HOST = "127.0.0.1";
 const DEFAULT_OPENCODE_PORT = 4096;
 const DEFAULT_OPENCODE_STARTUP_TIMEOUT_MS = 30000;
+const DEFAULT_DISCORD_PREFIX = "!oc";
+const DEFAULT_DISCORD_SLASH_COMMAND = "oc";
+const DEFAULT_DISCORD_MAX_MESSAGE_CHARS = 1850;
 const STATE_DIR_NAME = "opencode-messaging-bridge";
 const STATE_FILE_NAME = "state.json";
 
@@ -33,8 +36,15 @@ export interface BridgeConfig {
         enabled: boolean;
         botToken: string | null;
         applicationID: string | null;
+        guildID: string | null;
         allowedUserIDs: string[];
         controlChannelID: string | null;
+        prefix: string;
+        slashCommand: string;
+        registerSlashCommands: boolean;
+        slashResponsesEphemeral: boolean;
+        messageContentIntent: boolean;
+        maxMessageChars: number;
     };
 }
 
@@ -96,8 +106,21 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
             enabled: discordBotToken !== null && discordControlChannelID !== null && discordAllowedUserIDs.length > 0,
             botToken: discordBotToken,
             applicationID: readOptionalString(env.OPENCODE_BRIDGE_DISCORD_APPLICATION_ID),
+            guildID: readOptionalString(env.OPENCODE_BRIDGE_DISCORD_GUILD_ID),
             allowedUserIDs: discordAllowedUserIDs,
             controlChannelID: discordControlChannelID,
+            prefix: readRequiredString(env.OPENCODE_BRIDGE_DISCORD_PREFIX, DEFAULT_DISCORD_PREFIX, "OPENCODE_BRIDGE_DISCORD_PREFIX"),
+            slashCommand: readDiscordSlashCommand(env.OPENCODE_BRIDGE_DISCORD_SLASH_COMMAND),
+            registerSlashCommands: parseBoolean(env.OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS),
+            slashResponsesEphemeral: parseBooleanDefault(env.OPENCODE_BRIDGE_DISCORD_SLASH_EPHEMERAL, true),
+            messageContentIntent: parseBoolean(env.OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT),
+            maxMessageChars: parseIntegerInRange(
+                env.OPENCODE_BRIDGE_DISCORD_MAX_MESSAGE_CHARS,
+                DEFAULT_DISCORD_MAX_MESSAGE_CHARS,
+                500,
+                1990,
+                "OPENCODE_BRIDGE_DISCORD_MAX_MESSAGE_CHARS",
+            ),
         },
     };
 }
@@ -169,6 +192,27 @@ function parseBoolean(value: string | undefined): boolean {
     }
 
     return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function parseBooleanDefault(value: string | undefined, fallback: boolean): boolean {
+    if (!value) {
+        return fallback;
+    }
+
+    return parseBoolean(value);
+}
+
+function readDiscordSlashCommand(value: string | undefined): string {
+    const command = readRequiredString(
+        value,
+        DEFAULT_DISCORD_SLASH_COMMAND,
+        "OPENCODE_BRIDGE_DISCORD_SLASH_COMMAND",
+    ).toLowerCase();
+    if (!/^[a-z0-9_-]{1,32}$/.test(command)) {
+        throw new Error("OPENCODE_BRIDGE_DISCORD_SLASH_COMMAND must be 1-32 lowercase letters, numbers, dashes, or underscores");
+    }
+
+    return command;
 }
 
 function parseIntegerInRange(value: string | undefined, fallback: number, min: number, max: number, envName: string): number {
