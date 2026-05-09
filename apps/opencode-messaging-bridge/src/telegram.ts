@@ -10,6 +10,9 @@ export const TELEGRAM_BRIDGE_BOT_COMMANDS: TelegramBotCommand[] = [
     { command: "prompt", description: "Send a prompt to the active OpenCode session" },
     { command: "reply", description: "Reply to the active OpenCode session" },
     { command: "abort", description: "Abort the active OpenCode session" },
+    { command: "allow", description: "Approve a pending OpenCode permission once" },
+    { command: "always", description: "Approve a pending OpenCode permission for this session" },
+    { command: "deny", description: "Reject a pending OpenCode permission" },
 ];
 
 export interface TelegramUpdate {

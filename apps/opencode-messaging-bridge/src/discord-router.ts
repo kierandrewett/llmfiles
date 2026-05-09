@@ -12,7 +12,7 @@ import {
     type SendDiscordInteractionMessageInput,
     type SendDiscordMessageInput,
 } from "./discord.js";
-import type { OpenCodeHealth, OpenCodeSession } from "./opencode.js";
+import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
     type BridgeState,
@@ -29,6 +29,7 @@ export interface DiscordRouterOpenCodeClient {
     createSession(input?: { title?: string; directory?: string }): Promise<OpenCodeSession>;
     sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void>;
     abortSession(input: { sessionID: string; directory?: string }): Promise<void>;
+    replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string; directory?: string }): Promise<void>;
 }
 
 export interface DiscordRouterDiscordClient {
@@ -142,8 +143,12 @@ export class DiscordBridgeRouter {
             await this.handleAbort(channelID);
             return;
         }
+        if (command.name === "allow" || command.name === "always" || command.name === "deny") {
+            await this.handlePermissionReply(channelID, command.name, command.args);
+            return;
+        }
 
-        await this.send(channelID, `[bridge] unknown command. Try ${this.config.discord.prefix} status, ${this.config.discord.prefix} sessions, ${this.config.discord.prefix} attach latest, ${this.config.discord.prefix} new, or ${this.config.discord.prefix} prompt.`);
+        await this.send(channelID, `[bridge] unknown command. Try ${this.config.discord.prefix} status, ${this.config.discord.prefix} sessions, ${this.config.discord.prefix} attach latest, ${this.config.discord.prefix} new, ${this.config.discord.prefix} prompt, or ${this.config.discord.prefix} allow.`);
     }
 
     private async handleStatus(channelID: string): Promise<void> {
@@ -216,6 +221,33 @@ export class DiscordBridgeRouter {
 
         await this.opencode.abortSession({ sessionID: surface.activeSessionID });
         await this.send(channelID, `[bridge] abort requested for ${surface.activeSessionID}`);
+    }
+
+    private async handlePermissionReply(channelID: string, command: "allow" | "always" | "deny", args: string[]): Promise<void> {
+        const permissionID = args[0]?.trim();
+        if (!permissionID) {
+            await this.send(channelID, "[bridge] permission ID is required");
+            return;
+        }
+
+        const state = await this.loadState();
+        const activeSessionID = findSurface(state, surfaceID(channelID))?.activeSessionID ?? undefined;
+        const response = permissionResponseForCommand(command);
+        const input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string } = {
+            permissionID,
+            response,
+        };
+        if (activeSessionID) {
+            input.sessionID = activeSessionID;
+        }
+
+        const feedback = command === "deny" ? args.slice(1).join(" ").trim() : "";
+        if (feedback) {
+            input.message = feedback;
+        }
+
+        await this.opencode.replyPermission(input);
+        await this.send(channelID, `[bridge] permission ${response} sent for ${permissionID}`);
     }
 
     private async latestSession(): Promise<OpenCodeSession | null> {
@@ -293,6 +325,7 @@ export class DiscordBridgeRouter {
             `- ${prefix} new <title> or /${slash} new`,
             `- ${prefix} prompt <text> or /${slash} prompt`,
             `- ${prefix} abort or /${slash} abort`,
+            `- ${prefix} allow <permission-id>, ${prefix} always <permission-id>, or ${prefix} deny <permission-id>`,
             this.config.implicitReply ? "Plain messages from allowed users are sent to the active session." : "Plain messages are ignored; use the prefix or slash command.",
         ].join("\n");
     }
@@ -341,6 +374,12 @@ export function parseDiscordSlashCommand(interaction: DiscordInteraction, comman
     if (name === "prompt" || name === "reply") {
         const text = optionValue(options, "text");
         return { name, args: text ? [text] : [], text };
+    }
+    if (name === "allow" || name === "always" || name === "deny") {
+        const permissionID = optionValue(options, "permission_id");
+        const message = name === "deny" ? optionValue(options, "message") : "";
+        const args = [permissionID, message].filter((entry) => entry.length > 0);
+        return { name, args, text: args.join(" ") };
     }
 
     return { name, args: [], text: "" };
@@ -392,4 +431,15 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
 
 function formatSessionLine(session: OpenCodeSession): string {
     return `${session.id}\t${session.title ?? "(untitled)"}`;
+}
+
+function permissionResponseForCommand(command: "allow" | "always" | "deny"): OpenCodePermissionResponse {
+    if (command === "allow") {
+        return "once";
+    }
+    if (command === "always") {
+        return "always";
+    }
+
+    return "reject";
 }

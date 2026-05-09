@@ -41,6 +41,16 @@ export interface AbortSessionInput {
     directory?: string;
 }
 
+export type OpenCodePermissionResponse = "once" | "always" | "reject";
+
+export interface ReplyPermissionInput {
+    sessionID?: string;
+    permissionID: string;
+    response: OpenCodePermissionResponse;
+    directory?: string;
+    message?: string;
+}
+
 export interface OpenCodeEvent {
     type: string;
     properties: Record<string, unknown>;
@@ -146,6 +156,36 @@ export class OpenCodeHttpClient {
         });
     }
 
+    async replyPermission(input: ReplyPermissionInput): Promise<void> {
+        try {
+            await this.requestJson(`/permission/${encodeURIComponent(input.permissionID)}/reply`, {
+                method: "POST",
+                query: {
+                    directory: input.directory,
+                },
+                body: permissionReplyBody(input),
+            });
+            return;
+        } catch (error) {
+            if (!(error instanceof OpenCodeHttpError) || error.status !== 404 || !input.sessionID) {
+                throw error;
+            }
+        }
+
+        await this.requestJson(
+            `/session/${encodeURIComponent(input.sessionID)}/permissions/${encodeURIComponent(input.permissionID)}`,
+            {
+                method: "POST",
+                query: {
+                    directory: input.directory,
+                },
+                body: {
+                    response: input.response,
+                },
+            },
+        );
+    }
+
     async subscribeEvents(input: SubscribeEventsInput = {}): Promise<AsyncIterable<OpenCodeEvent>> {
         const requestInit: RequestInit = {
             method: "GET",
@@ -207,6 +247,17 @@ interface RequestOptions {
     method: "GET" | "POST";
     query?: Record<string, string | number | undefined>;
     body?: Record<string, unknown>;
+}
+
+function permissionReplyBody(input: ReplyPermissionInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        reply: input.response,
+    };
+    if (input.message) {
+        body.message = input.message;
+    }
+
+    return body;
 }
 
 function parseSession(value: unknown, source: string): OpenCodeSession {

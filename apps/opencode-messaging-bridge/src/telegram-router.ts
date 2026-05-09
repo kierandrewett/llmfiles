@@ -1,5 +1,5 @@
 import type { BridgeConfig } from "./config.js";
-import type { OpenCodeHealth, OpenCodeSession } from "./opencode.js";
+import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
     type BridgeState,
@@ -23,7 +23,7 @@ import {
 
 const TELEGRAM_REACTION_DONE = "\u{1F44D}";
 const TELEGRAM_REACTION_UNKNOWN = "\u{1F914}";
-const TELEGRAM_DIRECT_COMMANDS = new Set(["status", "sessions", "attach", "new", "prompt", "reply", "abort"]);
+const TELEGRAM_DIRECT_COMMANDS = new Set(["status", "sessions", "attach", "new", "prompt", "reply", "abort", "allow", "always", "deny"]);
 
 export interface TelegramRouterOpenCodeClient {
     health(): Promise<OpenCodeHealth>;
@@ -32,6 +32,7 @@ export interface TelegramRouterOpenCodeClient {
     createSession(input?: { title?: string; directory?: string }): Promise<OpenCodeSession>;
     sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void>;
     abortSession(input: { sessionID: string; directory?: string }): Promise<void>;
+    replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string; directory?: string }): Promise<void>;
 }
 
 export interface TelegramRouterTelegramClient {
@@ -118,10 +119,15 @@ export class TelegramBridgeRouter {
             await this.react(message, TELEGRAM_REACTION_DONE);
             return;
         }
+        if (command.name === "allow" || command.name === "always" || command.name === "deny") {
+            await this.handlePermissionReply(message, command.name, command.args);
+            await this.react(message, TELEGRAM_REACTION_DONE);
+            return;
+        }
 
         await this.send(
             message,
-            bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, or /oc prompt."),
+            bridgePlain("unknown command. Try /oc status, /oc sessions, /oc attach latest, /oc new, /oc prompt, or /oc allow."),
         );
         await this.react(message, TELEGRAM_REACTION_UNKNOWN);
     }
@@ -225,6 +231,33 @@ export class TelegramBridgeRouter {
 
         await this.opencode.abortSession({ sessionID: surface.activeSessionID });
         await this.send(message, bridgeLine(`abort requested for ${markdownCode(surface.activeSessionID)}`));
+    }
+
+    private async handlePermissionReply(message: TelegramMessage, command: "allow" | "always" | "deny", args: string[]): Promise<void> {
+        const permissionID = args[0]?.trim();
+        if (!permissionID) {
+            await this.send(message, bridgePlain("permission ID is required"));
+            return;
+        }
+
+        const state = await this.loadState();
+        const activeSessionID = findSurface(state, surfaceID(message))?.activeSessionID ?? undefined;
+        const response = permissionResponseForCommand(command);
+        const input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string } = {
+            permissionID,
+            response,
+        };
+        if (activeSessionID) {
+            input.sessionID = activeSessionID;
+        }
+
+        const feedback = command === "deny" ? args.slice(1).join(" ").trim() : "";
+        if (feedback) {
+            input.message = feedback;
+        }
+
+        await this.opencode.replyPermission(input);
+        await this.send(message, bridgeLine(`permission ${markdownCode(response)} sent for ${markdownCode(permissionID)}`));
     }
 
     private async latestSession(): Promise<OpenCodeSession | null> {
@@ -358,6 +391,17 @@ function normaliseTopicName(value: string | null | undefined): string {
 
 function truncateTopicName(value: string): string {
     return Array.from(value).slice(0, 128).join("");
+}
+
+function permissionResponseForCommand(command: "allow" | "always" | "deny"): OpenCodePermissionResponse {
+    if (command === "allow") {
+        return "once";
+    }
+    if (command === "always") {
+        return "always";
+    }
+
+    return "reject";
 }
 
 function findSurface(state: BridgeState, id: string): BridgeSurfaceState | undefined {

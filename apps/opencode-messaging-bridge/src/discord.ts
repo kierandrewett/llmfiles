@@ -218,6 +218,16 @@ export function discordSlashCommandDefinition(name: string): Record<string, unkn
                 stringOption("text", "Reply text.", true),
             ]),
             subcommand("abort", "Abort the active session."),
+            subcommand("allow", "Approve a pending OpenCode permission once.", [
+                stringOption("permission_id", "Permission request ID.", true),
+            ]),
+            subcommand("always", "Approve a pending OpenCode permission for this session.", [
+                stringOption("permission_id", "Permission request ID.", true),
+            ]),
+            subcommand("deny", "Reject a pending OpenCode permission.", [
+                stringOption("permission_id", "Permission request ID.", true),
+                stringOption("message", "Optional feedback for OpenCode.", false),
+            ]),
         ],
     };
 }
