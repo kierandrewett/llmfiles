@@ -14,6 +14,7 @@ import { TelegramEventRelay } from "./telegram-event-relay.js";
 import { TelegramBridgePoller } from "./telegram-poller.js";
 import { TelegramBridgeRouter } from "./telegram-router.js";
 import { TelegramBotApiClient } from "./telegram.js";
+import { OpenRouterTranscriptionClient } from "./voice.js";
 
 const TELEGRAM_DISABLED_MESSAGE = "Telegram bridge is not enabled. "
     + "Set OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN and OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS.";
@@ -281,7 +282,12 @@ function telegramPoller(
 
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
     const telegram = new TelegramBotApiClient({ botToken });
-    const router = new TelegramBridgeRouter({ config, opencode, telegram });
+    const transcriber = voiceTranscriber(config);
+    const routerDependencies: ConstructorParameters<typeof TelegramBridgeRouter>[0] = { config, opencode, telegram };
+    if (transcriber) {
+        routerDependencies.transcriber = transcriber;
+    }
+    const router = new TelegramBridgeRouter(routerDependencies);
 
     return new TelegramBridgePoller({ statePath: config.statePath, telegram, router });
 }
@@ -352,9 +358,28 @@ function discordGateway(
 
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
     const discord = new DiscordBotApiClient({ botToken, maxMessageChars: config.discord.maxMessageChars });
-    const router = new DiscordBridgeRouter({ config, opencode, discord });
+    const transcriber = voiceTranscriber(config);
+    const routerDependencies: ConstructorParameters<typeof DiscordBridgeRouter>[0] = { config, opencode, discord };
+    if (transcriber) {
+        routerDependencies.transcriber = transcriber;
+    }
+    const router = new DiscordBridgeRouter(routerDependencies);
 
     return new DiscordGatewayRunner({ config, discord, router });
+}
+
+function voiceTranscriber(config: ReturnType<typeof loadBridgeConfig>): OpenRouterTranscriptionClient | null {
+    const apiKey = config.voice.openrouter.apiKey;
+    if (!config.voice.enabled || apiKey === null) {
+        return null;
+    }
+
+    return new OpenRouterTranscriptionClient({
+        apiKey,
+        baseUrl: config.voice.openrouter.baseUrl,
+        model: config.voice.openrouter.model,
+        language: config.voice.openrouter.language,
+    });
 }
 
 function discordBotToken(config: ReturnType<typeof loadBridgeConfig>): string {
