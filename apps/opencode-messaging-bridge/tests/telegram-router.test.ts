@@ -5,10 +5,12 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { type BridgeConfig } from "../src/config.js";
+import type { IntentResolverOutput } from "../src/intent-resolver.js";
 import { type OpenCodeHealth, type OpenCodePermissionResponse, type OpenCodeSession } from "../src/opencode.js";
 import { readBridgeState, writeBridgeState, createDefaultBridgeState } from "../src/state.js";
 import { TelegramBridgeRouter } from "../src/telegram-router.js";
 import {
+    type AnswerCallbackQueryInput,
     TELEGRAM_MARKDOWN_PARSE_MODE,
     type CreateForumTopicInput,
     type SendChatActionInput,
@@ -175,6 +177,133 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.reactions, [{ chatID: "456", messageID: 10, emoji: "\u{1F44D}" }]);
     });
 
+    it("starts the workspace intent resolver for short Telegram intents and asks with inline options", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "needs_clarification",
+                        question: "Which repository?",
+                        allowFreeText: false,
+                        options: [
+                            { id: "repo-api", label: "api", value: "api" },
+                        ],
+                    },
+                },
+            ],
+        });
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "work on api"));
+
+        const state = await readBridgeState(fixture.statePath);
+        const pending = state.intentResolvers[0];
+        assert.ok(pending);
+        assert.deepEqual(fixture.resolver.starts, [{ text: "work on api", workspaceRoot: "/workspace/dev" }]);
+        assert.equal(pending.platform, "telegram");
+        assert.equal(pending.surfaceID, "telegram:456:");
+        assert.equal(pending.userID, "123");
+        assert.equal(pending.resolverSessionID, "ses_resolver");
+        assert.equal(pending.originalText, "work on api");
+        assert.equal(pending.turnCount, 1);
+        assert.equal(pending.maxTurns, 4);
+        assert.equal(pending.expiresAt, "2026-05-09T00:10:00.000Z");
+        assert.equal(pending.lastQuestion, "Which repository?");
+        assert.equal(pending.allowFreeText, false);
+        assert.deepEqual(pending.options, [{ id: "repo-api", label: "api", value: "api" }]);
+        assert.deepEqual(fixture.telegram.messages, [
+            {
+                chatID: "456",
+                threadID: null,
+                text: "*\\[bridge\\]* Which repository\\?",
+                parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
+                replyMarkup: {
+                    inlineKeyboard: [
+                        [
+                            { text: "api", callbackData: `ir:${pending.id}:0` },
+                        ],
+                    ],
+                },
+            },
+        ]);
+    });
+
+    it("continues a pending resolver from an inline callback and starts the resolved workspace session", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            createdSession: { id: "ses_api", title: "api", directory: "/workspace/dev/api", time: null },
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "ready",
+                        path: "/workspace/dev/api",
+                        prompt: "Fix the failing tests.",
+                        title: "api",
+                        action: "create_session",
+                        metadata: {},
+                    },
+                },
+            ],
+        });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.intentResolvers.push(pendingResolverState({ id: "ir_existing", allowFreeText: false }));
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(callbackUpdate("123", "456", "callback-1", "ir:ir_existing:0"));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.telegram.callbackAnswers, [{ callbackQueryID: "callback-1", text: "Working on it" }]);
+        assert.deepEqual(fixture.resolver.continuations, [
+            { resolverSessionID: "ses_resolver", answer: "api", workspaceRoot: "/workspace/dev" },
+        ]);
+        assert.deepEqual(fixture.opencode.createdSessions, [{ title: "api", directory: "/workspace/dev/api" }]);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_api", text: "Fix the failing tests.", directory: "/workspace/dev/api" }]);
+        assert.deepEqual(read.intentResolvers, []);
+        assert.equal(read.surfaces[0]?.activeSessionID, "ses_api");
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), [
+            "*\\[bridge\\]* resolved `ses_api` api at `/workspace/dev/api`; prompt sent",
+        ]);
+    });
+
+    it("continues a pending resolver from free text when the clarification allows it", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            createdSession: { id: "ses_api", title: "api", directory: "/workspace/dev/api", time: null },
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "ready",
+                        path: "/workspace/dev/api",
+                        prompt: "Fix the failing tests.",
+                        title: "api",
+                        action: "create_session",
+                        metadata: {},
+                    },
+                },
+            ],
+        });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.intentResolvers.push(pendingResolverState({ id: "ir_existing", allowFreeText: true }));
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(update("123", "456", "the api repo"));
+
+        assert.deepEqual(fixture.resolver.starts, []);
+        assert.deepEqual(fixture.resolver.continuations, [
+            { resolverSessionID: "ses_resolver", answer: "the api repo", workspaceRoot: "/workspace/dev" },
+        ]);
+        assert.deepEqual(fixture.telegram.reactions, [{ chatID: "456", messageID: 10, emoji: "\u{1F44D}" }]);
+    });
+
     it("does not transcribe Telegram voice messages before a session is attached", async () => {
         const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from voice" });
         const router = new TelegramBridgeRouter(fixture.dependencies);
@@ -295,20 +424,36 @@ interface FixtureOptions {
     failReactions?: boolean;
     voiceEnabled?: boolean;
     transcriptionText?: string;
+    intentResolverEnabled?: boolean;
+    workspaceRoot?: string;
+    resolverOutputs?: IntentResolverRunFixture[];
+}
+
+interface IntentResolverRunFixture {
+    resolverSessionID: string;
+    output: IntentResolverOutput;
 }
 
 interface FakeOpenCode {
     healthCalls: number;
     createdTitles: string[];
-    prompts: Array<{ sessionID: string; text: string }>;
+    createdSessions: Array<{ title?: string; directory?: string }>;
+    prompts: Array<{ sessionID: string; text: string; directory?: string }>;
     permissionReplies: Array<{ sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }>;
     health(): Promise<OpenCodeHealth>;
     listSessions(options?: { limit?: number }): Promise<OpenCodeSession[]>;
     getSession(input: { sessionID: string }): Promise<OpenCodeSession>;
-    createSession(input?: { title?: string }): Promise<OpenCodeSession>;
-    sendPrompt(input: { sessionID: string; text: string }): Promise<void>;
+    createSession(input?: { title?: string; directory?: string }): Promise<OpenCodeSession>;
+    sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void>;
     abortSession(input: { sessionID: string }): Promise<void>;
     replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void>;
+}
+
+interface FakeIntentResolver {
+    starts: Array<{ text: string; workspaceRoot: string }>;
+    continuations: Array<{ resolverSessionID: string; answer: string; workspaceRoot: string }>;
+    start(input: { text: string; workspaceRoot: string }): Promise<IntentResolverRunFixture>;
+    continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<IntentResolverRunFixture>;
 }
 
 async function createFixture(options: FixtureOptions = {}): Promise<{
@@ -318,11 +463,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         messages: SendMessageInput[];
         actions: SendChatActionInput[];
         reactions: SetMessageReactionInput[];
+        callbackAnswers: AnswerCallbackQueryInput[];
         topics: CreateForumTopicInput[];
         fileRequests: Array<{ fileID: string }>;
         downloads: Array<{ filePath: string }>;
     };
     opencode: FakeOpenCode;
+    resolver: FakeIntentResolver;
     transcriber: FakeTranscriber;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-router-test-"));
@@ -332,6 +479,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         messages: [] as SendMessageInput[],
         actions: [] as SendChatActionInput[],
         reactions: [] as SetMessageReactionInput[],
+        callbackAnswers: [] as AnswerCallbackQueryInput[],
         topics: [] as CreateForumTopicInput[],
         fileRequests: [] as Array<{ fileID: string }>,
         downloads: [] as Array<{ filePath: string }>,
@@ -347,6 +495,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             }
 
             telegram.reactions.push(input);
+        },
+        async answerCallbackQuery(input: AnswerCallbackQueryInput): Promise<void> {
+            telegram.callbackAnswers.push(input);
         },
         async createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic> {
             telegram.topics.push(input);
@@ -378,6 +529,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     const opencode: FakeOpenCode = {
         healthCalls: 0,
         createdTitles: [],
+        createdSessions: [],
         prompts: [],
         permissionReplies: [],
         async health(): Promise<OpenCodeHealth> {
@@ -390,11 +542,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         async getSession(input: { sessionID: string }): Promise<OpenCodeSession> {
             return options.sessions?.find((session) => session.id === input.sessionID) ?? { id: input.sessionID, title: null, directory: null, time: null };
         },
-        async createSession(input: { title?: string } = {}): Promise<OpenCodeSession> {
+        async createSession(input: { title?: string; directory?: string } = {}): Promise<OpenCodeSession> {
             opencode.createdTitles.push(input.title ?? "");
-            return options.createdSession ?? { id: "ses_new", title: input.title ?? null, directory: null, time: null };
+            opencode.createdSessions.push(input);
+            return options.createdSession ?? { id: "ses_new", title: input.title ?? null, directory: input.directory ?? null, time: null };
         },
-        async sendPrompt(input: { sessionID: string; text: string }): Promise<void> {
+        async sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void> {
             opencode.prompts.push(input);
         },
         async abortSession(): Promise<void> {
@@ -404,6 +557,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             opencode.permissionReplies.push(input);
         },
     };
+    const resolver: FakeIntentResolver = {
+        starts: [],
+        continuations: [],
+        async start(input: { text: string; workspaceRoot: string }): Promise<IntentResolverRunFixture> {
+            resolver.starts.push(input);
+            return nextResolverOutput(options);
+        },
+        async continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<IntentResolverRunFixture> {
+            resolver.continuations.push(input);
+            return nextResolverOutput(options);
+        },
+    };
 
     return {
         statePath,
@@ -411,11 +576,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             config: bridgeConfig(statePath, options),
             telegram,
             opencode,
+            intentResolver: resolver,
             transcriber,
             now: () => new Date("2026-05-09T00:00:00.000Z"),
         },
         telegram,
         opencode,
+        resolver,
         transcriber,
     };
 }
@@ -457,10 +624,10 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             maxMessageChars: 1850,
         },
         workspace: {
-            root: null,
+            root: options.workspaceRoot ?? null,
         },
         intentResolver: {
-            enabled: false,
+            enabled: options.intentResolverEnabled ?? false,
             maxClarificationTurns: 4,
             clarificationTtlMs: 600000,
         },
@@ -475,6 +642,15 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             },
         },
     };
+}
+
+function nextResolverOutput(options: FixtureOptions): IntentResolverRunFixture {
+    const output = options.resolverOutputs?.shift();
+    if (!output) {
+        throw new Error("No fake resolver output configured");
+    }
+
+    return output;
 }
 
 function update(userID: string, chatID: string, text: string, threadID: string | null = null, chatType?: string): TelegramUpdate {
@@ -496,6 +672,25 @@ function update(userID: string, chatID: string, text: string, threadID: string |
     return {
         updateID: 1,
         message,
+    };
+}
+
+function callbackUpdate(userID: string, chatID: string, callbackQueryID: string, data: string, threadID: string | null = null): TelegramUpdate {
+    return {
+        updateID: 1,
+        message: null,
+        callbackQuery: {
+            id: callbackQueryID,
+            userID,
+            message: {
+                messageID: 99,
+                threadID,
+                userID: null,
+                chatID,
+                text: "Which repository?",
+            },
+            data,
+        },
     };
 }
 
@@ -526,4 +721,27 @@ function voiceUpdate(
 interface FakeTranscriber {
     transcriptions: Array<{ data: number[]; format: OpenRouterAudioFormat }>;
     transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
+}
+
+function pendingResolverState(input: { id: string; allowFreeText: boolean }) {
+    return {
+        id: input.id,
+        platform: "telegram" as const,
+        surfaceID: "telegram:456:",
+        surface: { chatID: "456", threadID: null },
+        userID: "123",
+        resolverSessionID: "ses_resolver",
+        workspaceRoot: "/workspace/dev",
+        originalText: "work on api",
+        turnCount: 1,
+        maxTurns: 4,
+        expiresAt: "2026-05-09T00:10:00.000Z",
+        lastQuestion: "Which repository?",
+        allowFreeText: input.allowFreeText,
+        options: [
+            { id: "repo-api", label: "api", value: "api" },
+        ],
+        createdAt: "2026-05-09T00:00:00.000Z",
+        updatedAt: "2026-05-09T00:00:00.000Z",
+    };
 }

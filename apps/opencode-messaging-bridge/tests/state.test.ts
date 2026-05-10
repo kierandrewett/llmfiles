@@ -73,6 +73,7 @@ describe("BridgeStateStore", () => {
             maxTurns: 4,
             expiresAt: "2026-05-09T00:10:00.000Z",
             lastQuestion: "Which repository do you mean?",
+            allowFreeText: false,
             options: [
                 { id: "repo-bsociety", label: "bsociety", value: "bsociety" },
             ],
