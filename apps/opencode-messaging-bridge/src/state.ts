@@ -64,6 +64,7 @@ export interface BridgeIntentResolverState {
     maxTurns: number;
     expiresAt: string;
     lastQuestion: string;
+    allowFreeText: boolean;
     options: BridgeIntentResolverClarificationOptionState[];
     createdAt: string;
     updatedAt: string;
@@ -241,6 +242,7 @@ function parseIntentResolverState(value: unknown, source: string): BridgeIntentR
         maxTurns: requirePositiveInteger(record.maxTurns, `${source}.maxTurns`),
         expiresAt: requireString(record.expiresAt, `${source}.expiresAt`),
         lastQuestion: requireString(record.lastQuestion, `${source}.lastQuestion`),
+        allowFreeText: readOptionalBoolean(record.allowFreeText, `${source}.allowFreeText`) ?? false,
         options: requireArray(record.options, `${source}.options`).map((entry, index) => parseIntentResolverOptionState(entry, `${source}.options[${index}]`)),
         createdAt: requireString(record.createdAt, `${source}.createdAt`),
         updatedAt: requireString(record.updatedAt, `${source}.updatedAt`),
@@ -374,6 +376,17 @@ function readOptionalString(value: unknown, source: string): string | undefined 
     }
 
     return requireString(value, source);
+}
+
+function readOptionalBoolean(value: unknown, source: string): boolean | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+    if (typeof value !== "boolean") {
+        throw new Error(`${source} must be a boolean`);
+    }
+
+    return value;
 }
 
 function readOptionalNullableString(value: unknown, source: string): string | null | undefined {

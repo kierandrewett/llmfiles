@@ -7,9 +7,11 @@ import {
     scheduleErrorMessage,
 } from "./automation.js";
 import type { BridgeConfig } from "./config.js";
+import type { IntentResolverOutput, IntentResolverReadyOutput } from "./intent-resolver.js";
 import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
+    type BridgeIntentResolverState,
     type BridgeScheduledJobState,
     type BridgeState,
     type BridgeSurfaceAddress,
@@ -21,6 +23,7 @@ import {
     TELEGRAM_MARKDOWN_PARSE_MODE,
     chunkTelegramText,
     escapeTelegramMarkdown,
+    type AnswerCallbackQueryInput,
     type CreateForumTopicInput,
     type DownloadFileInput,
     type GetFileInput,
@@ -29,6 +32,7 @@ import {
     type SetMessageReactionInput,
     type TelegramFile,
     type TelegramForumTopic,
+    type TelegramCallbackQuery,
     type TelegramMessage,
     type TelegramUpdate,
 } from "./telegram.js";
@@ -41,6 +45,7 @@ import {
 
 const TELEGRAM_REACTION_DONE = "\u{1F44D}";
 const TELEGRAM_REACTION_UNKNOWN = "\u{1F914}";
+const TELEGRAM_INTENT_CALLBACK_PREFIX = "ir";
 const TELEGRAM_DIRECT_COMMANDS = new Set([
     "status",
     "sessions",
@@ -72,6 +77,7 @@ export interface TelegramRouterTelegramClient {
     sendMessage(input: SendMessageInput): Promise<unknown>;
     sendChatAction(input: SendChatActionInput): Promise<void>;
     setMessageReaction(input: SetMessageReactionInput): Promise<void>;
+    answerCallbackQuery(input: AnswerCallbackQueryInput): Promise<void>;
     createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic>;
     getFile(input: GetFileInput): Promise<TelegramFile>;
     downloadFile(input: DownloadFileInput): Promise<Uint8Array>;
@@ -81,10 +87,21 @@ export interface TelegramVoiceTranscriber {
     transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
 }
 
+export interface TelegramIntentResolverRunResult {
+    resolverSessionID: string;
+    output: IntentResolverOutput;
+}
+
+export interface TelegramIntentResolver {
+    start(input: { text: string; workspaceRoot: string }): Promise<TelegramIntentResolverRunResult>;
+    continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<TelegramIntentResolverRunResult>;
+}
+
 export interface TelegramBridgeRouterDependencies {
     config: BridgeConfig;
     opencode: TelegramRouterOpenCodeClient;
     telegram: TelegramRouterTelegramClient;
+    intentResolver?: TelegramIntentResolver;
     transcriber?: TelegramVoiceTranscriber;
     now?: () => Date;
 }
@@ -103,6 +120,7 @@ export class TelegramBridgeRouter {
     private readonly config: BridgeConfig;
     private readonly opencode: TelegramRouterOpenCodeClient;
     private readonly telegram: TelegramRouterTelegramClient;
+    private readonly intentResolver: TelegramIntentResolver | null;
     private readonly transcriber: TelegramVoiceTranscriber | null;
     private readonly now: () => Date;
 
@@ -110,11 +128,17 @@ export class TelegramBridgeRouter {
         this.config = dependencies.config;
         this.opencode = dependencies.opencode;
         this.telegram = dependencies.telegram;
+        this.intentResolver = dependencies.intentResolver ?? null;
         this.transcriber = dependencies.transcriber ?? null;
         this.now = dependencies.now ?? (() => new Date());
     }
 
     async handleUpdate(update: TelegramUpdate): Promise<void> {
+        if (update.callbackQuery) {
+            await this.handleCallbackQuery(update.callbackQuery);
+            return;
+        }
+
         const message = update.message;
         if (!message || !this.isAllowed(message)) {
             return;
@@ -130,6 +154,15 @@ export class TelegramBridgeRouter {
 
         const command = parseCommand(message.text);
         if (!command) {
+            if (await this.handlePendingResolverText(message, message.text)) {
+                await this.react(message, TELEGRAM_REACTION_DONE);
+                return;
+            }
+            if (this.config.intentResolver.enabled) {
+                await this.handleIntentResolverStart(message, message.text);
+                await this.react(message, TELEGRAM_REACTION_DONE);
+                return;
+            }
             if (!this.config.implicitReply) {
                 return;
             }
