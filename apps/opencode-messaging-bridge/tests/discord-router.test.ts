@@ -362,7 +362,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     return {
         statePath,
         dependencies: {
-            config: bridgeConfig(statePath),
+            config: bridgeConfig(statePath, options),
             discord,
             opencode,
             transcriber,
