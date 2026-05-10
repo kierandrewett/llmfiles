@@ -358,6 +358,16 @@ function bridgeConfig(statePath: string): BridgeConfig {
             messageContentIntent: false,
             maxMessageChars: 1850,
         },
+        voice: {
+            enabled: false,
+            maxAudioBytes: 20971520,
+            openrouter: {
+                apiKey: null,
+                baseUrl: "https://openrouter.ai/api/v1",
+                model: "openai/whisper-1",
+                language: null,
+            },
+        },
     };
 }
 

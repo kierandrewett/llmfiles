@@ -7,6 +7,9 @@ const DEFAULT_OPENCODE_STARTUP_TIMEOUT_MS = 30000;
 const DEFAULT_DISCORD_PREFIX = "!oc";
 const DEFAULT_DISCORD_SLASH_COMMAND = "oc";
 const DEFAULT_DISCORD_MAX_MESSAGE_CHARS = 1850;
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL = "openai/whisper-1";
+const DEFAULT_VOICE_MAX_AUDIO_BYTES = 20 * 1024 * 1024;
 const STATE_DIR_NAME = "opencode-messaging-bridge";
 const STATE_FILE_NAME = "state.json";
 
@@ -46,6 +49,16 @@ export interface BridgeConfig {
         slashResponsesEphemeral: boolean;
         messageContentIntent: boolean;
         maxMessageChars: number;
+    };
+    voice: {
+        enabled: boolean;
+        maxAudioBytes: number;
+        openrouter: {
+            apiKey: string | null;
+            baseUrl: string;
+            model: string;
+            language: string | null;
+        };
     };
 }
 
@@ -89,6 +102,11 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
     const telegramBotToken = readSecret(env.OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN);
     const discordBotToken = readSecret(env.OPENCODE_BRIDGE_DISCORD_BOT_TOKEN);
     const discordControlChannelID = readOptionalString(env.OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID);
+    const voiceEnabled = parseBoolean(env.OPENCODE_BRIDGE_VOICE_TRANSCRIPTION);
+    const openrouterApiKey = readSecret(env.OPENCODE_BRIDGE_OPENROUTER_API_KEY);
+    if (voiceEnabled && openrouterApiKey === null) {
+        throw new Error("OPENCODE_BRIDGE_OPENROUTER_API_KEY must be set when OPENCODE_BRIDGE_VOICE_TRANSCRIPTION is enabled");
+    }
 
     return {
         opencode: {
@@ -123,6 +141,32 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
                 1990,
                 "OPENCODE_BRIDGE_DISCORD_MAX_MESSAGE_CHARS",
             ),
+        },
+        voice: {
+            enabled: voiceEnabled,
+            maxAudioBytes: parseIntegerInRange(
+                env.OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES,
+                DEFAULT_VOICE_MAX_AUDIO_BYTES,
+                1,
+                DEFAULT_VOICE_MAX_AUDIO_BYTES,
+                "OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES",
+            ),
+            openrouter: {
+                apiKey: openrouterApiKey,
+                baseUrl: normaliseHttpsBaseUrl(
+                    env.OPENCODE_BRIDGE_OPENROUTER_BASE_URL ?? DEFAULT_OPENROUTER_BASE_URL,
+                    "OPENCODE_BRIDGE_OPENROUTER_BASE_URL",
+                ),
+                model: readRequiredString(
+                    env.OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_MODEL,
+                    DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
+                    "OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_MODEL",
+                ),
+                language: readOptionalNoWhitespace(
+                    env.OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_LANGUAGE,
+                    "OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_LANGUAGE",
+                ),
+            },
         },
     };
 }
@@ -175,6 +219,23 @@ function normaliseBaseUrl(value: string, envName: string): string {
     try {
         const url = new URL(value.trim());
         if (url.protocol !== "http:" && url.protocol !== "https:") {
+            throw new Error("unsupported protocol");
+        }
+        if (url.username || url.password) {
+            throw new Error("credentials are not allowed");
+        }
+
+        return url.toString().replace(/\/+$/, "");
+    } catch (error) {
+        const reason = error instanceof Error ? `: ${error.message}` : "";
+        throw new Error(`${envName} must be a valid URL${reason}`);
+    }
+}
+
+function normaliseHttpsBaseUrl(value: string, envName: string): string {
+    try {
+        const url = new URL(value.trim());
+        if (url.protocol !== "https:") {
             throw new Error("unsupported protocol");
         }
         if (url.username || url.password) {
@@ -257,6 +318,18 @@ function readSecret(value: string | undefined): string | null {
 function readOptionalString(value: string | undefined): string | null {
     const trimmed = value?.trim();
     return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function readOptionalNoWhitespace(value: string | undefined, envName: string): string | null {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+        return null;
+    }
+    if (/\s/.test(trimmed)) {
+        throw new Error(`${envName} must not contain whitespace`);
+    }
+
+    return trimmed;
 }
 
 function readRequiredString(value: string | undefined, fallback: string, envName: string): string {
