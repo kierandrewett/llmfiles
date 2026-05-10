@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 
+import { ScheduledPromptRunner } from "./automation.js";
 import { type Env, loadBridgeConfig } from "./config.js";
 import { DiscordEventRelay } from "./discord-event-relay.js";
 import { DiscordGatewayRunner } from "./discord-gateway.js";
@@ -18,6 +19,7 @@ const TELEGRAM_DISABLED_MESSAGE = "Telegram bridge is not enabled. "
     + "Set OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN and OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS.";
 const DISCORD_DISABLED_MESSAGE = "Discord bridge is not enabled. "
     + "Set OPENCODE_BRIDGE_DISCORD_BOT_TOKEN, OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID, and OPENCODE_BRIDGE_DISCORD_ALLOWED_USER_IDS.";
+const AUTOMATION_POLL_INTERVAL_MS = 30000;
 
 export interface OpenCodeClientLike {
     health(): Promise<OpenCodeHealth>;
@@ -33,6 +35,7 @@ export interface CliDependencies {
     telegramPoller?: TelegramPollerLike;
     discordGateway?: DiscordGatewayLike;
     eventPump?: OpenCodeEventPumpLike;
+    scheduledPromptRunner?: ScheduledPromptRunnerLike;
     processManager?: OpenCodeProcessManagerLike;
 }
 
@@ -46,6 +49,10 @@ export interface DiscordGatewayLike {
 
 export interface OpenCodeEventPumpLike {
     runOnce(): Promise<number>;
+}
+
+export interface ScheduledPromptRunnerLike {
+    runDueJobs(): Promise<number>;
 }
 
 export interface OpenCodeProcessManagerLike {
@@ -81,10 +88,12 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
         if (command === "telegram") {
             const poller = telegramPoller(config, dependencies);
             const pump = openCodeEventPump(config, dependencies, "telegram");
+            const scheduler = scheduledPromptRunner(config, dependencies, ["telegram"]);
             return await withOpenCodeProcess(config, dependencies, async () => {
                 await Promise.all([
                     runTelegramLoop(poller, stdout, stderr),
                     runOpenCodeEventLoop(pump, stdout, stderr),
+                    runScheduledPromptLoop(scheduler, stdout, stderr),
                 ]);
                 return 0;
             });
@@ -116,10 +125,12 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
         if (command === "discord") {
             const gateway = discordGateway(config, dependencies);
             const pump = openCodeEventPump(config, dependencies, "discord");
+            const scheduler = scheduledPromptRunner(config, dependencies, ["discord"]);
             return await withOpenCodeProcess(config, dependencies, async () => {
                 await Promise.all([
                     runDiscordGatewayLoop(gateway, stdout, stderr),
                     runOpenCodeEventLoop(pump, stdout, stderr),
+                    runScheduledPromptLoop(scheduler, stdout, stderr),
                 ]);
                 return 0;
             });
@@ -129,12 +140,23 @@ export async function runCli(argv = process.argv.slice(2), dependencies: CliDepe
             const poller = telegramPoller(config, dependencies);
             const gateway = discordGateway(config, dependencies);
             const pump = openCodeEventPump(config, dependencies, "telegram+discord");
+            const scheduler = scheduledPromptRunner(config, dependencies, ["telegram", "discord"]);
             return await withOpenCodeProcess(config, dependencies, async () => {
                 await Promise.all([
                     runTelegramLoop(poller, stdout, stderr),
                     runDiscordGatewayLoop(gateway, stdout, stderr),
                     runOpenCodeEventLoop(pump, stdout, stderr),
+                    runScheduledPromptLoop(scheduler, stdout, stderr),
                 ]);
+                return 0;
+            });
+        }
+
+        if (command === "automation-once") {
+            const scheduler = scheduledPromptRunner(config, dependencies);
+            return await withOpenCodeProcess(config, dependencies, async () => {
+                const processed = await scheduler.runDueJobs();
+                stdout(`[bridge] automation processed ${processed} scheduled job(s)`);
                 return 0;
             });
         }
@@ -228,6 +250,20 @@ function printHelp(output: (line: string) => void): void {
     output("  discord             Run Discord Gateway continuously");
     output("  telegram+discord-once  Run one Telegram poll and one Discord Gateway cycle");
     output("  telegram+discord    Run Telegram and Discord continuously");
+    output("  automation-once     Run due scheduled prompts once");
+}
+
+function scheduledPromptRunner(
+    config: ReturnType<typeof loadBridgeConfig>,
+    dependencies: CliDependencies,
+    platforms?: Array<"telegram" | "discord">,
+): ScheduledPromptRunnerLike {
+    if (dependencies.scheduledPromptRunner) {
+        return dependencies.scheduledPromptRunner;
+    }
+
+    const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
+    return new ScheduledPromptRunner({ statePath: config.statePath, opencode, platforms });
 }
 
 function telegramPoller(
@@ -381,6 +417,28 @@ async function runOpenCodeEventLoop(
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             stderr(`[bridge] opencode event relay failed: ${message}`);
+            await delay(5000);
+        }
+    }
+}
+
+async function runScheduledPromptLoop(
+    scheduler: ScheduledPromptRunnerLike,
+    stdout: (line: string) => void,
+    stderr: (line: string) => void,
+): Promise<never> {
+    stdout("[bridge] automation scheduler started");
+
+    for (;;) {
+        try {
+            const processed = await scheduler.runDueJobs();
+            if (processed > 0) {
+                stdout(`[bridge] automation processed ${processed} scheduled job(s)`);
+            }
+            await delay(AUTOMATION_POLL_INTERVAL_MS);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            stderr(`[bridge] automation scheduler failed: ${message}`);
             await delay(5000);
         }
     }

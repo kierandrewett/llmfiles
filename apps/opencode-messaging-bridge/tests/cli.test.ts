@@ -168,6 +168,19 @@ describe("runCli", () => {
         ]);
     });
 
+    it("runs due scheduled prompts once", async () => {
+        const { env, output, scheduledPromptRunner } = await createFixture({ scheduledJobsProcessed: 2 });
+
+        const exitCode = await runCli(
+            ["automation-once"],
+            { env, stdout: output.stdout, stderr: output.stderr, scheduledPromptRunner },
+        );
+
+        assert.equal(exitCode, 0);
+        assert.equal(scheduledPromptRunner.calls, 1);
+        assert.deepEqual(output.lines, ["[bridge] automation processed 2 scheduled job(s)"]);
+    });
+
     it("refuses Discord Gateway when Discord is not configured", async () => {
         const { env, output, discordGateway } = await createFixture();
 
@@ -188,6 +201,7 @@ interface FixtureOptions {
     createdSession?: OpenCodeSession;
     telegramProcessed?: number;
     discordProcessed?: number;
+    scheduledJobsProcessed?: number;
 }
 
 interface FixtureClient {
@@ -207,6 +221,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     client: FixtureClient;
     telegramPoller: { calls: number; runOnce(): Promise<number> };
     discordGateway: { calls: number; runOnce(): Promise<number> };
+    scheduledPromptRunner: { calls: number; runDueJobs(): Promise<number> };
     processManager: { calls: string[]; start(): Promise<string>; stop(): Promise<void> };
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bridge-cli-test-"));
@@ -251,6 +266,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             async runOnce(): Promise<number> {
                 this.calls += 1;
                 return options.discordProcessed ?? 0;
+            },
+        },
+        scheduledPromptRunner: {
+            calls: 0,
+            async runDueJobs(): Promise<number> {
+                this.calls += 1;
+                return options.scheduledJobsProcessed ?? 0;
             },
         },
         processManager: {

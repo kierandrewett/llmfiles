@@ -1,4 +1,5 @@
 import {
+    type BridgePlatform,
     type BridgeScheduledJobState,
     type BridgeState,
     loadOrCreateBridgeState,
@@ -16,6 +17,7 @@ export interface ScheduledPromptOpenCodeClient {
 export interface ScheduledPromptRunnerDependencies {
     statePath: string;
     opencode: ScheduledPromptOpenCodeClient;
+    platforms?: BridgePlatform[];
     now?: () => Date;
 }
 
@@ -26,18 +28,20 @@ export type ScheduleParseResult =
 export class ScheduledPromptRunner {
     private readonly statePath: string;
     private readonly opencode: ScheduledPromptOpenCodeClient;
+    private readonly platforms: Set<BridgePlatform> | null;
     private readonly now: () => Date;
 
     constructor(dependencies: ScheduledPromptRunnerDependencies) {
         this.statePath = dependencies.statePath;
         this.opencode = dependencies.opencode;
+        this.platforms = dependencies.platforms ? new Set(dependencies.platforms) : null;
         this.now = dependencies.now ?? (() => new Date());
     }
 
     async runDueJobs(): Promise<number> {
         const state = await loadOrCreateBridgeState(this.statePath, this.now());
         const now = this.now();
-        const dueJobs = state.jobs.filter((job) => isDue(job, now));
+        const dueJobs = state.jobs.filter((job) => this.isRunnable(job, now));
         if (dueJobs.length === 0) {
             return 0;
         }
@@ -63,6 +67,14 @@ export class ScheduledPromptRunner {
         } catch (error) {
             recordScheduledJobRun(storedJob, now, scheduleErrorMessage(error));
         }
+    }
+
+    private isRunnable(job: BridgeScheduledJobState, now: Date): boolean {
+        if (this.platforms && !this.platforms.has(job.platform)) {
+            return false;
+        }
+
+        return isDue(job, now);
     }
 }
 
