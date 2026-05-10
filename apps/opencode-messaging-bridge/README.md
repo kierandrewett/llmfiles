@@ -14,6 +14,7 @@ This package implements the standalone bridge described in `../../docs/opencode-
   `/allow`, `/always`, and `/deny`
 - OpenCode server-sent event relay for bound Telegram and Discord sessions, including Telegram draft/edit previews for
   assistant text parts, permission prompts, tool status updates, and session errors
+- opt-in OpenRouter voice transcription for Telegram voice/audio messages and Discord audio attachments
 - optional OpenCode process supervision for `opencode serve`
 - CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
@@ -28,6 +29,7 @@ back to the OpenCode server.
 - [Telegram setup](#telegram-setup)
 - [Discord setup](#discord-setup)
 - [Local setup](#local-setup)
+- [Voice transcription](#voice-transcription)
 - [Commands](#commands)
 - [Docker](#docker)
 
@@ -45,9 +47,9 @@ Discord app  -> Discord Gateway/API -/        ^
 ```
 
 No OpenCode HTTP port needs to be exposed. The container only needs outbound network access for the configured messaging
-platform and whichever model provider OpenCode uses. Telegram uses Bot API long polling. Discord uses a Gateway WebSocket
-for inbound messages and interactions, plus REST calls for responses. The bridge sends prompts to OpenCode, then relays
-assistant text back to the bound chat or channel.
+platform, whichever model provider OpenCode uses, and OpenRouter if voice transcription is enabled. Telegram uses Bot API
+long polling. Discord uses a Gateway WebSocket for inbound messages and interactions, plus REST calls for responses. The
+bridge sends prompts to OpenCode, then relays assistant text back to the bound chat or channel.
 
 ## Control surface support
 
@@ -83,29 +85,27 @@ export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
 just opencode-bridge discord
 ```
 
-For Docker Compose, build the resolved OpenCode config, then copy and edit the example files from this package directory:
+For Docker Compose, build the resolved OpenCode config, then copy and edit the one-file example from this package
+directory:
 
 ```bash
 just opencode-bridge-config
-cp .env.example .env
-mkdir -p "$HOME/.config/opencode-messaging-bridge"
-cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
-$EDITOR .env
-$EDITOR "$HOME/.config/opencode-messaging-bridge/env"
+cp compose.example.yaml compose.local.yaml
+$EDITOR compose.local.yaml
 ```
 
-Set this in `.env`:
+Set the command in `compose.local.yaml` if you only want Discord:
 
-```bash
-OPENCODE_BRIDGE_COMMAND=discord
+```yaml
+command: ["yarn", "start", "discord"]
 ```
 
-Keep the Discord token block in the private runtime env file and remove the Telegram token block if you are not running
+Keep the Discord token block in `compose.local.yaml` and remove or blank the Telegram token block if you are not running
 Telegram. Then start the container:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f opencode-bridge
+docker compose -f compose.local.yaml up -d --build
+docker compose -f compose.local.yaml logs -f opencode-bridge
 ```
 
 Smoke test from the configured Discord control channel:

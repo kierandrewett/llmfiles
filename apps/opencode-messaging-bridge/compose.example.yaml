@@ -57,6 +57,19 @@ services:
       OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS: "123456789"
       OPENCODE_BRIDGE_TELEGRAM_ALLOWED_CHAT_IDS: "123456789"
       OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS: "0"
+
+      # Optional OpenRouter voice transcription:
+      # 1. Leave disabled unless you want Telegram voice/audio or Discord audio attachments
+      #    transcribed and sent as prompts to the active OpenCode session.
+      # 2. If you enable it, put the real OpenRouter key in compose.local.yaml only.
+      # 3. The key is not written to bridge state. Do not commit compose.local.yaml.
+      OPENCODE_BRIDGE_VOICE_TRANSCRIPTION: "0"
+      OPENCODE_BRIDGE_OPENROUTER_API_KEY: ""
+      OPENCODE_BRIDGE_OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"
+      OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_MODEL: "openai/whisper-1"
+      # Optional ISO-639-1 hint. Leave blank for provider auto-detection.
+      OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_LANGUAGE: ""
+      OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES: "20971520"
     volumes:
       # OpenCode auth from /connect. This may need write access for token refresh.
       - "/home/kieran/.local/share/opencode:/home/node/.local/share/opencode"
