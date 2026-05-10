@@ -631,11 +631,11 @@ Verification:
 ## Next steps
 
 Phase 1, Telegram control, Discord control, managed process supervision, event relay, permission replies, scheduled prompt
-automation, opt-in OpenRouter voice transcription, and Docker Compose packaging now live in
+automation, opt-in OpenRouter voice transcription, workspace intent resolution, and Docker Compose packaging now live in
 `llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to smoke test the real runtimes:
 
 - smoke test the continuous `discord` command against the private Discord control channel, once with an external
-  `opencode serve` and once through Docker Compose with `OPENCODE_BRIDGE_COMMAND=discord`
+  `opencode serve` and once through Docker Compose with `command: ["yarn", "start", "discord"]`
 - smoke test the continuous `telegram` command against a private Telegram chat, once with an external `opencode serve`
   and once with `OPENCODE_BRIDGE_MANAGE_OPENCODE=1`
 - build and run the Docker image with mounted `~/.local/share/opencode`, mounted `~/.config/opencode`, a
@@ -644,5 +644,7 @@ automation, opt-in OpenRouter voice transcription, and Docker Compose packaging 
 - smoke test `/oc schedule`, `/oc jobs`, `/oc run-now`, and `/oc unschedule` from Telegram and Discord
 - smoke test Telegram voice messages and Discord audio attachments with `OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=1` and an
   untracked OpenRouter key
+- smoke test short Telegram and Discord plain-text intents with `OPENCODE_BRIDGE_INTENT_RESOLVER=1`, including one
+  multi-turn clarification path on each platform
 
 The dedicated-repo option can stay deferred until the daemon has Telegram and Discord parity. Keeping the first implementation in `llmfiles` is still the smallest reversible step.
