@@ -6,6 +6,7 @@ import { DiscordEventRelay } from "./discord-event-relay.js";
 import { DiscordGatewayRunner } from "./discord-gateway.js";
 import { DiscordBridgeRouter } from "./discord-router.js";
 import { DiscordBotApiClient } from "./discord.js";
+import { IntentResolverRunner } from "./intent-resolver-runner.js";
 import { OpenCodeEventPump, type OpenCodeEventHandler } from "./opencode-event-pump.js";
 import { OpenCodeProcessManager } from "./opencode-process.js";
 import { OpenCodeHttpClient, type OpenCodeHealth, type OpenCodeSession } from "./opencode.js";
@@ -283,7 +284,11 @@ function telegramPoller(
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
     const telegram = new TelegramBotApiClient({ botToken });
     const transcriber = voiceTranscriber(config);
+    const intentResolver = intentResolverRunner(config, opencode);
     const routerDependencies: ConstructorParameters<typeof TelegramBridgeRouter>[0] = { config, opencode, telegram };
+    if (intentResolver) {
+        routerDependencies.intentResolver = intentResolver;
+    }
     if (transcriber) {
         routerDependencies.transcriber = transcriber;
     }
@@ -380,6 +385,14 @@ function voiceTranscriber(config: ReturnType<typeof loadBridgeConfig>): OpenRout
         model: config.voice.openrouter.model,
         language: config.voice.openrouter.language,
     });
+}
+
+function intentResolverRunner(config: ReturnType<typeof loadBridgeConfig>, opencode: OpenCodeHttpClient): IntentResolverRunner | null {
+    if (!config.intentResolver.enabled) {
+        return null;
+    }
+
+    return new IntentResolverRunner({ opencode });
 }
 
 function discordBotToken(config: ReturnType<typeof loadBridgeConfig>): string {

@@ -372,6 +372,221 @@ export class TelegramBridgeRouter {
         }
     }
 
+    private async handleCallbackQuery(callbackQuery: TelegramCallbackQuery): Promise<void> {
+        const message = callbackQuery.message;
+        if (!message || !this.isAllowedCallbackQuery(callbackQuery)) {
+            return;
+        }
+
+        const parsed = parseIntentCallbackData(callbackQuery.data);
+        if (!parsed) {
+            await this.answerCallback(callbackQuery, "Unknown action");
+            return;
+        }
+
+        const state = await this.loadState();
+        const pending = state.intentResolvers.find((entry) => entry.id === parsed.resolverID);
+        if (!pending || pending.platform !== "telegram" || pending.surfaceID !== surfaceID(message) || pending.userID !== callbackQuery.userID) {
+            await this.answerCallback(callbackQuery, "That clarification expired");
+            return;
+        }
+        if (resolverExpired(pending, this.now())) {
+            removeIntentResolver(state, pending.id);
+            state.updatedAt = this.now().toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.answerCallback(callbackQuery, "That clarification expired");
+            return;
+        }
+
+        const option = pending.options[parsed.optionIndex];
+        if (!option) {
+            await this.answerCallback(callbackQuery, "That option is no longer available");
+            return;
+        }
+
+        await this.answerCallback(callbackQuery, "Working on it");
+        await this.continueIntentResolver({
+            message: { ...message, userID: callbackQuery.userID },
+            pending,
+            answer: option.value ?? option.label,
+        });
+    }
+
+    private async handlePendingResolverText(message: TelegramMessage, text: string): Promise<boolean> {
+        const state = await this.loadState();
+        const pending = findPendingIntentResolver(state, "telegram", surfaceID(message), message.userID ?? "");
+        if (!pending) {
+            return false;
+        }
+        if (resolverExpired(pending, this.now())) {
+            removeIntentResolver(state, pending.id);
+            state.updatedAt = this.now().toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(message, bridgePlain("that clarification expired. Send the intent again to restart."));
+            return true;
+        }
+        if (!pending.allowFreeText) {
+            await this.send(message, bridgePlain("use one of the buttons for this clarification."));
+            return true;
+        }
+
+        await this.continueIntentResolver({ message, pending, answer: text });
+        return true;
+    }
+
+    private async handleIntentResolverStart(message: TelegramMessage, text: string): Promise<void> {
+        const resolver = this.intentResolver;
+        const workspaceRoot = this.config.workspace.root;
+        if (!resolver || workspaceRoot === null) {
+            await this.send(message, bridgePlain("intent resolver is not configured"));
+            return;
+        }
+
+        await this.telegram.sendChatAction({ chatID: message.chatID, threadID: message.threadID, action: "typing" });
+        const result = await resolver.start({ text, workspaceRoot });
+        await this.handleIntentResolverOutput({
+            message,
+            resolverSessionID: result.resolverSessionID,
+            output: result.output,
+            workspaceRoot,
+            originalText: text,
+            pending: null,
+        });
+    }
+
+    private async continueIntentResolver(input: { message: TelegramMessage; pending: BridgeIntentResolverState; answer: string }): Promise<void> {
+        const resolver = this.intentResolver;
+        if (!resolver) {
+            await this.send(input.message, bridgePlain("intent resolver is not configured"));
+            return;
+        }
+
+        await this.telegram.sendChatAction({ chatID: input.message.chatID, threadID: input.message.threadID, action: "typing" });
+        const result = await resolver.continue({
+            resolverSessionID: input.pending.resolverSessionID,
+            answer: input.answer,
+            workspaceRoot: input.pending.workspaceRoot,
+        });
+        await this.handleIntentResolverOutput({
+            message: input.message,
+            resolverSessionID: result.resolverSessionID,
+            output: result.output,
+            workspaceRoot: input.pending.workspaceRoot,
+            originalText: input.pending.originalText,
+            pending: input.pending,
+        });
+    }
+
+    private async handleIntentResolverOutput(input: {
+        message: TelegramMessage;
+        resolverSessionID: string;
+        output: IntentResolverOutput;
+        workspaceRoot: string;
+        originalText: string;
+        pending: BridgeIntentResolverState | null;
+    }): Promise<void> {
+        const output = input.output;
+        if (output.status === "needs_clarification") {
+            await this.storeAndSendClarification({ ...input, output });
+            return;
+        }
+        if (output.status === "cannot_resolve") {
+            if (input.pending) {
+                await this.removePendingResolver(input.pending.id);
+            }
+            await this.send(input.message, bridgeLine(`could not resolve intent: ${escapeTelegramMarkdown(output.reason)}`));
+            return;
+        }
+
+        if (input.pending) {
+            await this.removePendingResolver(input.pending.id);
+        }
+        await this.startResolvedIntentSession(input.message, output);
+    }
+
+    private async storeAndSendClarification(input: {
+        message: TelegramMessage;
+        resolverSessionID: string;
+        output: Extract<IntentResolverOutput, { status: "needs_clarification" }>;
+        workspaceRoot: string;
+        originalText: string;
+        pending: BridgeIntentResolverState | null;
+    }): Promise<void> {
+        const state = await this.loadState();
+        const timestamp = this.now().toISOString();
+        const turnCount = (input.pending?.turnCount ?? 0) + 1;
+        if (turnCount > this.config.intentResolver.maxClarificationTurns) {
+            if (input.pending) {
+                removeIntentResolver(state, input.pending.id);
+            }
+            state.updatedAt = timestamp;
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(input.message, bridgePlain("intent resolver reached the clarification limit. Send the intent again with more detail."));
+            return;
+        }
+
+        const pending: BridgeIntentResolverState = {
+            id: input.pending?.id ?? createIntentResolverID(state, this.now()),
+            platform: "telegram",
+            surfaceID: surfaceID(input.message),
+            surface: surfaceAddress(input.message),
+            userID: input.message.userID ?? "",
+            resolverSessionID: input.resolverSessionID,
+            workspaceRoot: input.workspaceRoot,
+            originalText: input.originalText,
+            turnCount,
+            maxTurns: this.config.intentResolver.maxClarificationTurns,
+            expiresAt: new Date(this.now().getTime() + this.config.intentResolver.clarificationTtlMs).toISOString(),
+            lastQuestion: input.output.question,
+            allowFreeText: input.output.allowFreeText,
+            options: input.output.options.map((option) => option.value === undefined
+                ? { id: option.id, label: option.label }
+                : { id: option.id, label: option.label, value: option.value }),
+            createdAt: input.pending?.createdAt ?? timestamp,
+            updatedAt: timestamp,
+        };
+
+        upsertIntentResolver(state, pending);
+        state.updatedAt = timestamp;
+        await writeBridgeState(this.config.statePath, state);
+        await this.sendClarification(input.message, pending);
+    }
+
+    private async startResolvedIntentSession(message: TelegramMessage, output: IntentResolverReadyOutput): Promise<void> {
+        const sessionInput: { title?: string; directory?: string } = { directory: output.path };
+        if (output.title !== null) {
+            sessionInput.title = output.title;
+        }
+
+        const session = await this.opencode.createSession(sessionInput);
+        await this.bind(message, session);
+        await this.opencode.sendPrompt({ sessionID: session.id, text: output.prompt, directory: output.path });
+        await this.send(message, bridgeLine(`resolved ${formatSessionLine(session)} at ${markdownCode(output.path)}; prompt sent`));
+    }
+
+    private async sendClarification(message: TelegramMessage, pending: BridgeIntentResolverState): Promise<void> {
+        const replyMarkup = pending.options.length === 0
+            ? undefined
+            : {
+                inlineKeyboard: pending.options.map((option, index) => [
+                    { text: option.label, callbackData: intentCallbackData(pending.id, index) },
+                ]),
+            };
+
+        await this.send(message, bridgePlain(pending.lastQuestion), replyMarkup === undefined ? undefined : { replyMarkup });
+    }
+
+    private async removePendingResolver(id: string): Promise<void> {
+        const state = await this.loadState();
+        removeIntentResolver(state, id);
+        state.updatedAt = this.now().toISOString();
+        await writeBridgeState(this.config.statePath, state);
+    }
+
+    private async answerCallback(callbackQuery: TelegramCallbackQuery, text: string): Promise<void> {
+        await this.telegram.answerCallbackQuery({ callbackQueryID: callbackQuery.id, text });
+    }
+
     private async handleAbort(message: TelegramMessage): Promise<void> {
         const state = await this.loadState();
         const surface = findSurface(state, surfaceID(message));
@@ -543,14 +758,20 @@ export class TelegramBridgeRouter {
         await writeBridgeState(this.config.statePath, state);
     }
 
-    private async send(message: TelegramMessage, text: string): Promise<void> {
-        for (const chunk of chunkTelegramText(text)) {
-            await this.telegram.sendMessage({
+    private async send(message: TelegramMessage, text: string, options: { replyMarkup?: SendMessageInput["replyMarkup"] } = {}): Promise<void> {
+        const chunks = chunkTelegramText(text);
+        for (const [index, chunk] of chunks.entries()) {
+            const input: SendMessageInput = {
                 chatID: message.chatID,
                 threadID: message.threadID,
                 text: chunk,
                 parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
-            });
+            };
+            if (index === 0 && options.replyMarkup) {
+                input.replyMarkup = options.replyMarkup;
+            }
+
+            await this.telegram.sendMessage(input);
         }
     }
 
@@ -575,6 +796,17 @@ export class TelegramBridgeRouter {
         }
 
         return this.config.telegram.allowedChatIDs.includes(message.chatID);
+    }
+
+    private isAllowedCallbackQuery(callbackQuery: TelegramCallbackQuery): boolean {
+        if (!this.config.telegram.allowedUserIDs.includes(callbackQuery.userID)) {
+            return false;
+        }
+        if (this.config.telegram.allowedChatIDs.length === 0) {
+            return true;
+        }
+
+        return callbackQuery.message !== null && this.config.telegram.allowedChatIDs.includes(callbackQuery.message.chatID);
     }
 }
 
@@ -680,6 +912,58 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
 
 function jobsForSurface(state: BridgeState, id: string): BridgeScheduledJobState[] {
     return state.jobs.filter((job) => job.surfaceID === id);
+}
+
+function findPendingIntentResolver(state: BridgeState, platform: "telegram", id: string, userID: string): BridgeIntentResolverState | undefined {
+    return state.intentResolvers.find((entry) => entry.platform === platform && entry.surfaceID === id && entry.userID === userID);
+}
+
+function upsertIntentResolver(state: BridgeState, resolver: BridgeIntentResolverState): void {
+    const index = state.intentResolvers.findIndex((entry) => entry.id === resolver.id);
+    if (index === -1) {
+        state.intentResolvers.push(resolver);
+        return;
+    }
+
+    state.intentResolvers[index] = resolver;
+}
+
+function removeIntentResolver(state: BridgeState, id: string): void {
+    const index = state.intentResolvers.findIndex((entry) => entry.id === id);
+    if (index !== -1) {
+        state.intentResolvers.splice(index, 1);
+    }
+}
+
+function createIntentResolverID(state: BridgeState, now: Date): string {
+    return `ir_${now.getTime().toString(36)}_${(state.intentResolvers.length + 1).toString(36)}`;
+}
+
+function resolverExpired(resolver: BridgeIntentResolverState, now: Date): boolean {
+    const expiresAt = Date.parse(resolver.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt <= now.getTime();
+}
+
+function intentCallbackData(resolverID: string, optionIndex: number): string {
+    return `${TELEGRAM_INTENT_CALLBACK_PREFIX}:${resolverID}:${optionIndex.toString(36)}`;
+}
+
+function parseIntentCallbackData(data: string | null): { resolverID: string; optionIndex: number } | null {
+    if (data === null) {
+        return null;
+    }
+
+    const parts = data.split(":");
+    if (parts.length !== 3 || parts[0] !== TELEGRAM_INTENT_CALLBACK_PREFIX || parts[1]?.length === 0) {
+        return null;
+    }
+
+    const optionIndex = Number.parseInt(parts[2] ?? "", 36);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) {
+        return null;
+    }
+
+    return { resolverID: parts[1] ?? "", optionIndex };
 }
 
 function formatTelegramJobLine(job: BridgeScheduledJobState): string {
