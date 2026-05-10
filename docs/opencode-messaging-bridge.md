@@ -2,7 +2,8 @@
 
 Status: design note with Phase 1, Telegram command routing/output, Discord Gateway/REST command routing/output, richer
 OpenCode event relay, bridge-native permission replies, scheduled prompt automation, optional OpenRouter voice
-transcription, optional managed OpenCode process support, and Docker Compose runtime support in place, May 2026.
+transcription, optional workspace intent resolution, optional managed OpenCode process support, and Docker Compose runtime
+support in place, May 2026.
 
 This document defines a standalone, always-on messaging bridge for OpenCode. It is the next step after the Discord remote-control plugin prototype. The plugin proved the UX and the platform edge cases, but it also showed the wrong lifecycle: a plugin attached to an OpenCode worker can exit before slow Discord retries, thread recovery, or cross-platform routing has finished.
 
@@ -17,6 +18,8 @@ The bridge should run as its own daemon and treat OpenCode, Telegram, and Discor
 - Let an allowlisted user schedule repeated prompts against an explicitly bound OpenCode session.
 - Let an allowlisted user send an audio prompt through opt-in voice transcription without storing the transcription
   provider key in bridge state.
+- Let an allowlisted user send a short plain-text intent that is resolved through a hidden OpenCode session before the
+  bridge creates the real workspace session.
 - Keep platform-specific state durable across daemon restarts.
 - Avoid storing secrets in state or git.
 - Avoid relying on Discord creating a large number of threads.
@@ -71,6 +74,12 @@ These are the source-backed facts the design relies on.
   Source: https://discord.com/developers/docs/topics/gateway#message-content-intent
 - Discord outbound messages must continue to set `allowed_mentions: { parse: [] }` to prevent tool or model text from pinging users, roles, `@here`, or `@everyone`.
   Source: current plugin safety model in `plugins/opencode/discord-remote-control.md`.
+- Discord message component interactions arrive as interaction type `MESSAGE_COMPONENT` and include `custom_id`,
+  `component_type`, and selected `values` for select menus.
+  Source: https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-object-message-component-data-structure
+- Discord legacy message components support action rows, buttons, and string selects with developer-defined `custom_id`
+  fields.
+  Source: https://discord.com/developers/docs/interactions/message-components
 - OpenRouter exposes `POST https://openrouter.ai/api/v1/audio/transcriptions` for speech-to-text. It accepts JSON with
   `model`, base64 `input_audio.data`, `input_audio.format`, and optional `language`, and returns a `text` field.
   Source: https://openrouter.ai/docs/api/api-reference/transcriptions/create-audio-transcriptions
@@ -108,6 +117,7 @@ Responsibilities:
 - Normalise inbound Telegram and Discord messages into one `BridgeInbound` shape.
 - Authorise inbound messages against platform-specific allowlists.
 - Resolve which OpenCode session an inbound message targets.
+- Route short plain-text intents through the hidden workspace resolver when it is enabled.
 - Create sessions when requested.
 - Attach platform surfaces to existing sessions.
 - Send prompts to OpenCode.
@@ -244,13 +254,43 @@ Draft schema:
       "updatedAt": "2026-05-09T00:00:00.000Z"
     }
   ],
+  "intentResolvers": [
+    {
+      "id": "ir_m4l7fyz4_1",
+      "platform": "discord",
+      "surfaceID": "discord:123456789012345678",
+      "surface": {
+        "channelID": "123456789012345678",
+        "threadID": null
+      },
+      "userID": "123456789012345678",
+      "resolverSessionID": "ses_resolver",
+      "workspaceRoot": "/workspace",
+      "originalText": "work on the API tests",
+      "turnCount": 1,
+      "maxTurns": 4,
+      "expiresAt": "2026-05-09T00:10:00.000Z",
+      "lastQuestion": "Which repository?",
+      "allowFreeText": false,
+      "options": [
+        {
+          "id": "api",
+          "label": "api",
+          "value": "api"
+        }
+      ],
+      "createdAt": "2026-05-09T00:00:00.000Z",
+      "updatedAt": "2026-05-09T00:00:00.000Z"
+    }
+  ],
   "deliveries": []
 }
 ```
 
-`jobs` is optional when reading old state files and defaults to an empty list. `deliveries` can start as an empty array and
-become a bounded outbox if platform sends need retry. The important part is that platform offsets, scheduled jobs, and
-session bindings are not held only in memory.
+`jobs` and `intentResolvers` are optional when reading old state files and default to empty lists. `intentResolvers` stores
+pending clarification state only, not bot tokens, model-provider keys, or OpenCode credentials. `deliveries` can start as an
+empty array and become a bounded outbox if platform sends need retry. The important part is that platform offsets, scheduled
+jobs, pending clarifications, and session bindings are not held only in memory.
 
 ### ConfigLoader
 
@@ -267,6 +307,10 @@ export OPENCODE_BRIDGE_OPENCODE_PORT="4096"
 export OPENCODE_BRIDGE_OPENCODE_WORKDIR="/path/to/project"
 export OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS="30000"
 export OPENCODE_BRIDGE_STATE_PATH="$HOME/.local/state/opencode-messaging-bridge/state.json"
+export OPENCODE_BRIDGE_WORKSPACE_ROOT="/workspace"
+export OPENCODE_BRIDGE_INTENT_RESOLVER="0"
+export OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS="4"
+export OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS="600000"
 
 export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="..."
 export OPENCODE_BRIDGE_TELEGRAM_ALLOWED_USER_IDS="12345"
@@ -343,6 +387,23 @@ Discord output rules:
 - Avoid repeated session metadata embeds.
 - Treat Discord rate limits as normal backpressure and persist retryable work before sleeping.
 
+### Workspace intent resolver
+
+The resolver is an optional layer for short, natural-language requests. It is disabled unless
+`OPENCODE_BRIDGE_INTENT_RESOLVER=1` and `OPENCODE_BRIDGE_WORKSPACE_ROOT` is an absolute path.
+
+Resolver rules:
+
+- The resolver runs in a hidden OpenCode session rooted at `OPENCODE_BRIDGE_WORKSPACE_ROOT`.
+- The resolver returns structured JSON only: `ready`, `needs_clarification`, or `cannot_resolve`.
+- A `ready` path is normalised and rejected if it escapes the workspace root.
+- Telegram clarification options use inline keyboards.
+- Discord clarification options use message components, currently a string select menu.
+- Clarification can continue for multiple turns up to `OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS`.
+- Pending clarification expires after `OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS`.
+- Discord plain-text starts and free-text continuations require Message Content intent, but component selections do not.
+- Existing explicit commands remain escape hatches and do not go through the resolver.
+
 ## OpenCode event mapping
 
 The bridge should ignore noisy or unsafe raw events and relay a small set of durable user-facing events.
@@ -403,10 +464,13 @@ does not send a partial or guessed prompt to OpenCode.
 Inbound text should resolve in this order:
 
 1. Explicit session ID in the command.
-2. Existing binding for the exact platform surface, for example Telegram `chat_id + message_thread_id`.
-3. The platform-specific active session for that user/chat, if configured.
-4. Latest OpenCode session only for explicit `attach latest`.
-5. Create a session only for explicit `/oc new` or a configured auto-create mode.
+2. Existing pending workspace resolver clarification for the same surface and user.
+3. Explicit command against the existing binding for the exact platform surface, for example Telegram
+   `chat_id + message_thread_id`.
+4. Hidden workspace intent resolver for plain text only when it is enabled.
+5. The platform-specific active session for that user/chat, if configured.
+6. Latest OpenCode session only for explicit `attach latest`.
+7. Create a session only for explicit `/oc new` or a resolver `ready` result.
 
 This avoids the bridge guessing and accidentally sending a prompt to the wrong repo or session.
 
@@ -529,8 +593,9 @@ Verification:
 
 Current status: Discord Gateway ownership, REST responses, allowlisted control-channel routing, slash commands, optional
 prefix commands, Gateway resume metadata, session binding, prompt sends, aborts, permission replies, and assistant text
-relay are implemented in `apps/opencode-messaging-bridge/`. The remaining gaps are optional explicit thread binding and
-live smoke testing against the real Discord bot runtime.
+relay are implemented in `apps/opencode-messaging-bridge/`. Discord component interactions also support workspace intent
+resolver clarification selects. The remaining gaps are optional explicit thread binding and live smoke testing against the
+real Discord bot runtime.
 
 Acceptance criteria:
 
@@ -539,6 +604,7 @@ Acceptance criteria:
 - Discord allowlist is enforced.
 - Outbound Discord messages use `allowed_mentions: { parse: [] }`.
 - Session binding works without creating a thread.
+- Workspace resolver clarification works through Discord message components.
 - Optional explicit thread binding works for existing threads.
 - Discord rate-limited sends are retried through the daemon, not lost with an OpenCode worker exit.
 

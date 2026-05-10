@@ -529,6 +529,8 @@ In `compose.local.yaml`:
 - replace the Telegram and Discord token/id placeholders for the surfaces you run
 - remove or blank the unused platform block if you only run one surface
 - replace the host project mount, keeping `/workspace/project` as the container path
+- if you enable the workspace intent resolver, keep `OPENCODE_BRIDGE_WORKSPACE_ROOT=/workspace` and mount every allowed repo
+  under `/workspace`
 - keep OpenCode auth mounted from `~/.local/share/opencode`, or replace that mount with a private Docker volume if you do
   not want token refresh writing to the host auth directory
 - leave voice transcription disabled, or set `OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=1` and add the OpenRouter key only in
@@ -580,10 +582,14 @@ OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS=1
 OPENCODE_BRIDGE_MANAGE_OPENCODE=1
 OPENCODE_BRIDGE_OPENCODE_HOST=127.0.0.1
 OPENCODE_BRIDGE_OPENCODE_PORT=4096
+OPENCODE_BRIDGE_WORKSPACE_ROOT=/workspace
+OPENCODE_BRIDGE_INTENT_RESOLVER=0
 OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=0
 ```
 
-If you enable voice transcription, add `OPENCODE_BRIDGE_OPENROUTER_API_KEY` to the same untracked env file.
+If you enable the workspace intent resolver, keep `OPENCODE_BRIDGE_WORKSPACE_ROOT` pointed at the parent directory that
+contains the mounted repos. If you enable voice transcription, add `OPENCODE_BRIDGE_OPENROUTER_API_KEY` to the same
+untracked env file.
 
 Run the container with secrets, OpenCode credentials, the target project, and bridge state mounted at runtime:
 
