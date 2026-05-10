@@ -263,7 +263,11 @@ function scheduledPromptRunner(
     }
 
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
-    return new ScheduledPromptRunner({ statePath: config.statePath, opencode, platforms });
+    if (platforms) {
+        return new ScheduledPromptRunner({ statePath: config.statePath, opencode, platforms });
+    }
+
+    return new ScheduledPromptRunner({ statePath: config.statePath, opencode });
 }
 
 function telegramPoller(
