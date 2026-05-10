@@ -98,6 +98,52 @@ describe("TelegramBotApiClient", () => {
         });
     });
 
+    it("normalises callback query updates with message context", async () => {
+        const { client } = createClient([
+            {
+                ok: true,
+                result: [
+                    {
+                        update_id: 101,
+                        callback_query: {
+                            id: "callback-1",
+                            from: { id: 1234567890123, is_bot: false, first_name: "Kieran" },
+                            message: {
+                                message_id: 8,
+                                message_thread_id: 42,
+                                chat: { id: -1009876543210, type: "supergroup", title: "Bridge" },
+                                text: "Which repository?",
+                            },
+                            data: "ir:ir_m9z:0",
+                        },
+                    },
+                ],
+            },
+        ]);
+
+        const updates = await client.getUpdates();
+
+        assert.deepEqual(updates, [
+            {
+                updateID: 101,
+                message: null,
+                callbackQuery: {
+                    id: "callback-1",
+                    userID: "1234567890123",
+                    message: {
+                        messageID: 8,
+                        threadID: "42",
+                        userID: null,
+                        chatID: "-1009876543210",
+                        chatType: "supergroup",
+                        text: "Which repository?",
+                    },
+                    data: "ir:ir_m9z:0",
+                },
+            },
+        ]);
+    });
+
     it("sends text messages with optional thread IDs", async () => {
         const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
 
@@ -117,6 +163,49 @@ describe("TelegramBotApiClient", () => {
             link_preview_options: { is_disabled: true },
         });
         assert.deepEqual(sent, { messageID: 10 });
+    });
+
+    it("sends inline keyboards for clarification prompts", async () => {
+        const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
+
+        await client.sendMessage({
+            chatID: "123",
+            threadID: null,
+            text: "Which repository?",
+            replyMarkup: {
+                inlineKeyboard: [
+                    [
+                        { text: "api", callbackData: "ir:ir_m9z:0" },
+                    ],
+                ],
+            },
+        });
+
+        assert.equal(requests[0]?.method, "sendMessage");
+        assert.deepEqual(requests[0]?.body, {
+            chat_id: "123",
+            text: "Which repository?",
+            link_preview_options: { is_disabled: true },
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: "api", callback_data: "ir:ir_m9z:0" },
+                    ],
+                ],
+            },
+        });
+    });
+
+    it("answers callback queries", async () => {
+        const { client, requests } = createClient([{ ok: true, result: true }]);
+
+        await client.answerCallbackQuery({ callbackQueryID: "callback-1", text: "Working on it" });
+
+        assert.equal(requests[0]?.method, "answerCallbackQuery");
+        assert.deepEqual(requests[0]?.body, {
+            callback_query_id: "callback-1",
+            text: "Working on it",
+        });
     });
 
     it("creates forum topics and normalises the returned thread ID", async () => {

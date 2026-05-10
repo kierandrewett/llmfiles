@@ -35,7 +35,7 @@ describe("TelegramBridgePoller", () => {
 
         assert.equal(processed, 2);
         assert.deepEqual(fixture.telegram.commands, [{ commands: TELEGRAM_BRIDGE_BOT_COMMANDS }]);
-        assert.deepEqual(fixture.telegram.requests, [{ offset: 5, timeoutSeconds: 30, allowedUpdates: ["message"] }]);
+        assert.deepEqual(fixture.telegram.requests, [{ offset: 5, timeoutSeconds: 30, allowedUpdates: ["message", "callback_query"] }]);
         assert.deepEqual(fixture.router.handledUpdateIDs, [5, 6]);
         assert.equal(updatedState.platforms.telegram.updateOffset, 7);
     });
