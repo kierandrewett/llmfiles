@@ -128,6 +128,136 @@ describe("DiscordBridgeRouter", () => {
         assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] transcribed audio sent to ses_abc"]);
     });
 
+    it("starts the workspace intent resolver for short Discord intents and asks with a select menu", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "needs_clarification",
+                        question: "Which repository?",
+                        allowFreeText: false,
+                        options: [{ id: "repo-api", label: "api", value: "api" }],
+                    },
+                },
+            ],
+        });
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "work on api"));
+
+        const state = await readBridgeState(fixture.statePath);
+        const pending = state.intentResolvers[0];
+        assert.ok(pending);
+        assert.deepEqual(fixture.resolver.starts, [{ text: "work on api", workspaceRoot: "/workspace/dev" }]);
+        assert.equal(pending.platform, "discord");
+        assert.equal(pending.surfaceID, "discord:control-channel");
+        assert.equal(pending.userID, "user-id");
+        assert.equal(pending.resolverSessionID, "ses_resolver");
+        assert.equal(pending.originalText, "work on api");
+        assert.equal(pending.turnCount, 1);
+        assert.equal(pending.maxTurns, 4);
+        assert.equal(pending.expiresAt, "2026-05-09T00:10:00.000Z");
+        assert.equal(pending.lastQuestion, "Which repository?");
+        assert.equal(pending.allowFreeText, false);
+        assert.deepEqual(pending.options, [{ id: "repo-api", label: "api", value: "api" }]);
+        assert.deepEqual(fixture.discord.messages, [
+            {
+                channelID: "control-channel",
+                content: "[bridge] Which repository?",
+                components: [
+                    {
+                        type: 1,
+                        components: [
+                            {
+                                type: 3,
+                                custom_id: `ir:${pending.id}`,
+                                placeholder: "Choose an answer",
+                                min_values: 1,
+                                max_values: 1,
+                                options: [{ label: "api", value: "0" }],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]);
+    });
+
+    it("continues a pending resolver from a Discord component interaction and starts the resolved workspace session", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            createdSession: { id: "ses_api", title: "api", directory: "/workspace/dev/api", time: null },
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "ready",
+                        path: "/workspace/dev/api",
+                        prompt: "Fix the failing tests.",
+                        title: "api",
+                        action: "create_session",
+                        metadata: {},
+                    },
+                },
+            ],
+        });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.intentResolvers.push(pendingResolverState({ id: "ir_existing", allowFreeText: false }));
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleInteraction(componentInteraction("user-id", "control-channel", "ir:ir_existing", ["0"]));
+
+        const read = await readBridgeState(fixture.statePath);
+        assert.deepEqual(fixture.discord.interactions.map((entry) => entry.content), ["Working on it"]);
+        assert.deepEqual(fixture.resolver.continuations, [
+            { resolverSessionID: "ses_resolver", answer: "api", workspaceRoot: "/workspace/dev" },
+        ]);
+        assert.deepEqual(fixture.opencode.createdSessions, [{ title: "api", directory: "/workspace/dev/api" }]);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_api", text: "Fix the failing tests.", directory: "/workspace/dev/api" }]);
+        assert.deepEqual(read.intentResolvers, []);
+        assert.equal(read.surfaces[0]?.activeSessionID, "ses_api");
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), [
+            "[bridge] resolved ses_api\tapi at /workspace/dev/api; prompt sent",
+        ]);
+    });
+
+    it("continues a pending Discord resolver from free text when the clarification allows it", async () => {
+        const fixture = await createFixture({
+            intentResolverEnabled: true,
+            workspaceRoot: "/workspace/dev",
+            createdSession: { id: "ses_api", title: "api", directory: "/workspace/dev/api", time: null },
+            resolverOutputs: [
+                {
+                    resolverSessionID: "ses_resolver",
+                    output: {
+                        status: "ready",
+                        path: "/workspace/dev/api",
+                        prompt: "Fix the failing tests.",
+                        title: "api",
+                        action: "create_session",
+                        metadata: {},
+                    },
+                },
+            ],
+        });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.intentResolvers.push(pendingResolverState({ id: "ir_existing", allowFreeText: true }));
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "the api repo"));
+
+        assert.deepEqual(fixture.resolver.starts, []);
+        assert.deepEqual(fixture.resolver.continuations, [
+            { resolverSessionID: "ses_resolver", answer: "the api repo", workspaceRoot: "/workspace/dev" },
+        ]);
+    });
+
     it("does not transcribe Discord audio before a session is attached", async () => {
         const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from Discord audio" });
         const router = new DiscordBridgeRouter(fixture.dependencies);
@@ -263,20 +393,36 @@ interface FixtureOptions {
     createdSession?: OpenCodeSession;
     voiceEnabled?: boolean;
     transcriptionText?: string;
+    intentResolverEnabled?: boolean;
+    workspaceRoot?: string;
+    resolverOutputs?: IntentResolverRunFixture[];
+}
+
+interface IntentResolverRunFixture {
+    resolverSessionID: string;
+    output: IntentResolverOutput;
 }
 
 interface FakeOpenCode {
     healthCalls: number;
     createdTitles: string[];
-    prompts: Array<{ sessionID: string; text: string }>;
+    createdSessions: Array<{ title?: string; directory?: string }>;
+    prompts: Array<{ sessionID: string; text: string; directory?: string }>;
     permissionReplies: Array<{ sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }>;
     health(): Promise<OpenCodeHealth>;
     listSessions(options?: { limit?: number }): Promise<OpenCodeSession[]>;
     getSession(input: { sessionID: string }): Promise<OpenCodeSession>;
-    createSession(input?: { title?: string }): Promise<OpenCodeSession>;
-    sendPrompt(input: { sessionID: string; text: string }): Promise<void>;
+    createSession(input?: { title?: string; directory?: string }): Promise<OpenCodeSession>;
+    sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void>;
     abortSession(input: { sessionID: string }): Promise<void>;
     replyPermission(input: { sessionID?: string; permissionID: string; response: OpenCodePermissionResponse; message?: string }): Promise<void>;
+}
+
+interface FakeIntentResolver {
+    starts: Array<{ text: string; workspaceRoot: string }>;
+    continuations: Array<{ resolverSessionID: string; answer: string; workspaceRoot: string }>;
+    start(input: { text: string; workspaceRoot: string }): Promise<IntentResolverRunFixture>;
+    continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<IntentResolverRunFixture>;
 }
 
 async function createFixture(options: FixtureOptions = {}): Promise<{
@@ -290,6 +436,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     };
     downloads: string[];
     opencode: FakeOpenCode;
+    resolver: FakeIntentResolver;
     transcriber: FakeTranscriber;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-discord-router-test-"));
@@ -333,6 +480,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
     const opencode: FakeOpenCode = {
         healthCalls: 0,
         createdTitles: [],
+        createdSessions: [],
         prompts: [],
         permissionReplies: [],
         async health(): Promise<OpenCodeHealth> {
@@ -345,11 +493,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         async getSession(input: { sessionID: string }): Promise<OpenCodeSession> {
             return options.sessions?.find((session) => session.id === input.sessionID) ?? { id: input.sessionID, title: null, directory: null, time: null };
         },
-        async createSession(input: { title?: string } = {}): Promise<OpenCodeSession> {
+        async createSession(input: { title?: string; directory?: string } = {}): Promise<OpenCodeSession> {
             opencode.createdTitles.push(input.title ?? "");
-            return options.createdSession ?? { id: "ses_new", title: input.title ?? null, directory: null, time: null };
+            opencode.createdSessions.push(input);
+            return options.createdSession ?? { id: "ses_new", title: input.title ?? null, directory: input.directory ?? null, time: null };
         },
-        async sendPrompt(input: { sessionID: string; text: string }): Promise<void> {
+        async sendPrompt(input: { sessionID: string; text: string; directory?: string }): Promise<void> {
             opencode.prompts.push(input);
         },
         async abortSession(): Promise<void> {
@@ -359,6 +508,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             opencode.permissionReplies.push(input);
         },
     };
+    const resolver: FakeIntentResolver = {
+        starts: [],
+        continuations: [],
+        async start(input: { text: string; workspaceRoot: string }): Promise<IntentResolverRunFixture> {
+            resolver.starts.push(input);
+            return nextResolverOutput(options);
+        },
+        async continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<IntentResolverRunFixture> {
+            resolver.continuations.push(input);
+            return nextResolverOutput(options);
+        },
+    };
 
     return {
         statePath,
@@ -366,6 +527,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             config: bridgeConfig(statePath, options),
             discord,
             opencode,
+            intentResolver: resolver,
             transcriber,
             fetch: fetcher,
             now: () => new Date("2026-05-09T00:00:00.000Z"),
@@ -373,6 +535,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         discord,
         downloads,
         opencode,
+        resolver,
         transcriber,
     };
 }
@@ -414,10 +577,10 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             maxMessageChars: 1850,
         },
         workspace: {
-            root: null,
+            root: options.workspaceRoot ?? null,
         },
         intentResolver: {
-            enabled: false,
+            enabled: options.intentResolverEnabled ?? false,
             maxClarificationTurns: 4,
             clarificationTtlMs: 600000,
         },
@@ -432,6 +595,15 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             },
         },
     };
+}
+
+function nextResolverOutput(options: FixtureOptions): IntentResolverRunFixture {
+    const output = options.resolverOutputs?.shift();
+    if (!output) {
+        throw new Error("No fake resolver output configured");
+    }
+
+    return output;
 }
 
 function message(userID: string, channelID: string, content: string, attachments: DiscordAttachment[] = []): DiscordMessage {
@@ -498,5 +670,45 @@ function interaction(
                 },
             ],
         },
+    };
+}
+
+function componentInteraction(userID: string, channelID: string, customID: string, values: string[]): DiscordInteraction {
+    return {
+        id: "interaction-id",
+        token: "interaction-token",
+        type: 3,
+        channelID,
+        guildID: "guild-id",
+        userID,
+        data: {
+            options: [],
+            componentType: 3,
+            customID,
+            values,
+        },
+    };
+}
+
+function pendingResolverState(input: { id: string; allowFreeText: boolean }) {
+    return {
+        id: input.id,
+        platform: "discord" as const,
+        surfaceID: "discord:control-channel",
+        surface: { channelID: "control-channel", threadID: null },
+        userID: "user-id",
+        resolverSessionID: "ses_resolver",
+        workspaceRoot: "/workspace/dev",
+        originalText: "work on api",
+        turnCount: 1,
+        maxTurns: 4,
+        expiresAt: "2026-05-09T00:10:00.000Z",
+        lastQuestion: "Which repository?",
+        allowFreeText: input.allowFreeText,
+        options: [
+            { id: "repo-api", label: "api", value: "api" },
+        ],
+        createdAt: "2026-05-09T00:00:00.000Z",
+        updatedAt: "2026-05-09T00:00:00.000Z",
     };
 }
