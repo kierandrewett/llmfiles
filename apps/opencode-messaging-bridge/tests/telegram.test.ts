@@ -63,6 +63,41 @@ describe("TelegramBotApiClient", () => {
         ]);
     });
 
+    it("normalises Telegram voice messages into audio attachments", async () => {
+        const { client } = createClient([
+            {
+                ok: true,
+                result: [
+                    {
+                        update_id: 100,
+                        message: {
+                            message_id: 7,
+                            from: { id: 1234567890123, is_bot: false, first_name: "Kieran" },
+                            chat: { id: -1009876543210, type: "supergroup", title: "Bridge" },
+                            voice: {
+                                file_id: "voice-file-id",
+                                file_unique_id: "voice-unique-id",
+                                duration: 4,
+                                mime_type: "audio/ogg",
+                                file_size: 1234,
+                            },
+                        },
+                    },
+                ],
+            },
+        ]);
+
+        const updates = await client.getUpdates();
+
+        assert.deepEqual(updates[0]?.message?.audio, {
+            kind: "voice",
+            fileID: "voice-file-id",
+            fileName: null,
+            fileSize: 1234,
+            mimeType: "audio/ogg",
+        });
+    });
+
     it("sends text messages with optional thread IDs", async () => {
         const { client, requests } = createClient([{ ok: true, result: { message_id: 10 } }]);
 

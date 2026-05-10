@@ -17,6 +17,7 @@ import {
     type TelegramForumTopic,
     type TelegramUpdate,
 } from "../src/telegram.js";
+import type { OpenRouterAudioFormat, TranscriptionResult } from "../src/voice.js";
 
 const tempDirs: string[] = [];
 
@@ -156,6 +157,36 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* prompt sent to `ses_abc`"]);
     });
 
+    it("transcribes Telegram voice messages and sends them to the active session", async () => {
+        const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from voice" });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "telegram:456:", platform: "telegram", surface: { chatID: "456", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(voiceUpdate("123", "456", { fileID: "voice-file", mimeType: "audio/ogg", fileSize: 3 }));
+
+        assert.deepEqual(fixture.telegram.fileRequests, [{ fileID: "voice-file" }]);
+        assert.deepEqual(fixture.telegram.downloads, [{ filePath: "voice/file.ogg" }]);
+        assert.deepEqual(fixture.transcriber.transcriptions, [{ data: [1, 2, 3], format: "ogg" }]);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "hello from voice" }]);
+        assert.deepEqual(fixture.telegram.actions, [{ chatID: "456", threadID: null, action: "typing" }]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* transcribed audio sent to `ses_abc`"]);
+        assert.deepEqual(fixture.telegram.reactions, [{ chatID: "456", messageID: 10, emoji: "\u{1F44D}" }]);
+    });
+
+    it("does not transcribe Telegram voice messages before a session is attached", async () => {
+        const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from voice" });
+        const router = new TelegramBridgeRouter(fixture.dependencies);
+
+        await router.handleUpdate(voiceUpdate("123", "456", { fileID: "voice-file", mimeType: "audio/ogg", fileSize: 3 }));
+
+        assert.deepEqual(fixture.telegram.fileRequests, []);
+        assert.deepEqual(fixture.transcriber.transcriptions, []);
+        assert.deepEqual(fixture.opencode.prompts, []);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* no active session\. Use /oc attach latest or /oc new first\."]);
+    });
+
     it("schedules prompts against the active Telegram session", async () => {
         const fixture = await createFixture();
         const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
@@ -262,6 +293,8 @@ interface FixtureOptions {
     topic?: TelegramForumTopic;
     failTopicCreation?: boolean;
     failReactions?: boolean;
+    voiceEnabled?: boolean;
+    transcriptionText?: string;
 }
 
 interface FakeOpenCode {
@@ -286,8 +319,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         actions: SendChatActionInput[];
         reactions: SetMessageReactionInput[];
         topics: CreateForumTopicInput[];
+        fileRequests: Array<{ fileID: string }>;
+        downloads: Array<{ filePath: string }>;
     };
     opencode: FakeOpenCode;
+    transcriber: FakeTranscriber;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-telegram-router-test-"));
     tempDirs.push(dir);
@@ -297,6 +333,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         actions: [] as SendChatActionInput[],
         reactions: [] as SetMessageReactionInput[],
         topics: [] as CreateForumTopicInput[],
+        fileRequests: [] as Array<{ fileID: string }>,
+        downloads: [] as Array<{ filePath: string }>,
         async sendMessage(input: SendMessageInput): Promise<void> {
             telegram.messages.push(input);
         },
@@ -317,6 +355,24 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             }
 
             return options.topic ?? { messageThreadID: "777", name: input.name, iconColor: 7322096, iconCustomEmojiID: null, isNameImplicit: false };
+        },
+        async getFile(input: { fileID: string }): Promise<{ fileID: string; uniqueID: string; size: number | null; path: string }> {
+            telegram.fileRequests.push(input);
+
+            return { fileID: input.fileID, uniqueID: "unique-file", size: 3, path: "voice/file.ogg" };
+        },
+        async downloadFile(input: { filePath: string }): Promise<Uint8Array> {
+            telegram.downloads.push(input);
+
+            return new Uint8Array([1, 2, 3]);
+        },
+    };
+    const transcriber: FakeTranscriber = {
+        transcriptions: [],
+        async transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult> {
+            transcriber.transcriptions.push({ data: Array.from(input.data), format: input.format });
+
+            return { text: options.transcriptionText ?? "transcribed text" };
         },
     };
     const opencode: FakeOpenCode = {
@@ -355,10 +411,12 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             config: bridgeConfig(statePath, options),
             telegram,
             opencode,
+            transcriber,
             now: () => new Date("2026-05-09T00:00:00.000Z"),
         },
         telegram,
         opencode,
+        transcriber,
     };
 }
 
@@ -399,10 +457,10 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             maxMessageChars: 1850,
         },
         voice: {
-            enabled: false,
+            enabled: options.voiceEnabled ?? false,
             maxAudioBytes: 20971520,
             openrouter: {
-                apiKey: null,
+                apiKey: options.voiceEnabled ? "openrouter-key" : null,
                 baseUrl: "https://openrouter.ai/api/v1",
                 model: "openai/whisper-1",
                 language: null,
@@ -431,4 +489,33 @@ function update(userID: string, chatID: string, text: string, threadID: string |
         updateID: 1,
         message,
     };
+}
+
+function voiceUpdate(
+    userID: string,
+    chatID: string,
+    audio: { fileID: string; mimeType: string | null; fileSize: number | null },
+): TelegramUpdate {
+    return {
+        updateID: 1,
+        message: {
+            messageID: 10,
+            threadID: null,
+            userID,
+            chatID,
+            text: null,
+            audio: {
+                kind: "voice",
+                fileID: audio.fileID,
+                fileName: null,
+                fileSize: audio.fileSize,
+                mimeType: audio.mimeType,
+            },
+        },
+    };
+}
+
+interface FakeTranscriber {
+    transcriptions: Array<{ data: number[]; format: OpenRouterAudioFormat }>;
+    transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
 }
