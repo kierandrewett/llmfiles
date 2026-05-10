@@ -31,6 +31,15 @@ export interface TelegramMessage {
     chatID: string;
     chatType?: string;
     text: string | null;
+    audio?: TelegramAudioAttachment;
+}
+
+export interface TelegramAudioAttachment {
+    kind: "voice" | "audio";
+    fileID: string;
+    fileName: string | null;
+    fileSize: number | null;
+    mimeType: string | null;
 }
 
 export interface GetUpdatesOptions {
@@ -78,6 +87,21 @@ export interface TelegramBotCommand {
 
 export interface SetMyCommandsInput {
     commands: TelegramBotCommand[];
+}
+
+export interface GetFileInput {
+    fileID: string;
+}
+
+export interface TelegramFile {
+    fileID: string;
+    uniqueID: string;
+    size: number | null;
+    path: string | null;
+}
+
+export interface DownloadFileInput {
+    filePath: string;
 }
 
 export interface SetMessageReactionInput {
@@ -167,6 +191,22 @@ export class TelegramBotApiClient {
 
     async setMyCommands(input: SetMyCommandsInput): Promise<void> {
         await this.request("setMyCommands", telegramCommandsBody(input));
+    }
+
+    async getFile(input: GetFileInput): Promise<TelegramFile> {
+        const result = await this.request("getFile", { file_id: input.fileID });
+        return parseFile(result, "Telegram getFile result");
+    }
+
+    async downloadFile(input: DownloadFileInput): Promise<Uint8Array> {
+        const response = await this.fetcher(`${this.baseUrl}/file/bot${this.botToken}/${telegramFilePath(input.filePath)}`, {
+            method: "GET",
+        });
+        if (!response.ok) {
+            throw new TelegramBotApiError("downloadFile", `HTTP ${String(response.status)}`, response.status, null);
+        }
+
+        return new Uint8Array(await response.arrayBuffer());
     }
 
     async setMessageReaction(input: SetMessageReactionInput): Promise<void> {
@@ -337,12 +377,39 @@ function parseMessage(value: unknown, source: string): TelegramMessage {
         chatID: String(requireNumber(chat.id, `${source}.chat.id`)),
         text: record.text === undefined ? null : requireString(record.text, `${source}.text`),
     };
+    const audio = parseAudioAttachment(record, source);
 
     if (chatType) {
         message.chatType = chatType;
     }
+    if (audio) {
+        message.audio = audio;
+    }
 
     return message;
+}
+
+function parseAudioAttachment(record: Record<string, unknown>, source: string): TelegramAudioAttachment | null {
+    if (record.voice !== undefined) {
+        return parseTelegramAudioAttachment(record.voice, `${source}.voice`, "voice");
+    }
+    if (record.audio !== undefined) {
+        return parseTelegramAudioAttachment(record.audio, `${source}.audio`, "audio");
+    }
+
+    return null;
+}
+
+function parseTelegramAudioAttachment(value: unknown, source: string, kind: "voice" | "audio"): TelegramAudioAttachment {
+    const record = requireRecord(value, source);
+
+    return {
+        kind,
+        fileID: requireString(record.file_id, `${source}.file_id`),
+        fileName: readOptionalString(record.file_name, `${source}.file_name`) ?? null,
+        fileSize: record.file_size === undefined ? null : requireNumber(record.file_size, `${source}.file_size`),
+        mimeType: readOptionalString(record.mime_type, `${source}.mime_type`) ?? null,
+    };
 }
 
 function parseSentMessage(value: unknown, source: string): TelegramSentMessage {
@@ -362,6 +429,17 @@ function parseForumTopic(value: unknown, source: string): TelegramForumTopic {
         iconColor: requireNumber(record.icon_color, `${source}.icon_color`),
         iconCustomEmojiID: readOptionalString(record.icon_custom_emoji_id, `${source}.icon_custom_emoji_id`) ?? null,
         isNameImplicit: record.is_name_implicit === true,
+    };
+}
+
+function parseFile(value: unknown, source: string): TelegramFile {
+    const record = requireRecord(value, source);
+
+    return {
+        fileID: requireString(record.file_id, `${source}.file_id`),
+        uniqueID: requireString(record.file_unique_id, `${source}.file_unique_id`),
+        size: record.file_size === undefined ? null : requireNumber(record.file_size, `${source}.file_size`),
+        path: readOptionalString(record.file_path, `${source}.file_path`) ?? null,
     };
 }
 
@@ -422,6 +500,10 @@ function telegramInteger(value: string, source: string): number {
     }
 
     return parsed;
+}
+
+function telegramFilePath(value: string): string {
+    return value.split("/").map((part) => encodeURIComponent(part)).join("/");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

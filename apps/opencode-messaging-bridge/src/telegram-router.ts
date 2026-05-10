@@ -22,13 +22,22 @@ import {
     chunkTelegramText,
     escapeTelegramMarkdown,
     type CreateForumTopicInput,
+    type DownloadFileInput,
+    type GetFileInput,
     type SendChatActionInput,
     type SendMessageInput,
     type SetMessageReactionInput,
+    type TelegramFile,
     type TelegramForumTopic,
     type TelegramMessage,
     type TelegramUpdate,
 } from "./telegram.js";
+import {
+    audioFormatFromMetadata,
+    enforceAudioSizeLimit,
+    type OpenRouterAudioFormat,
+    type TranscriptionResult,
+} from "./voice.js";
 
 const TELEGRAM_REACTION_DONE = "\u{1F44D}";
 const TELEGRAM_REACTION_UNKNOWN = "\u{1F914}";
@@ -64,12 +73,19 @@ export interface TelegramRouterTelegramClient {
     sendChatAction(input: SendChatActionInput): Promise<void>;
     setMessageReaction(input: SetMessageReactionInput): Promise<void>;
     createForumTopic(input: CreateForumTopicInput): Promise<TelegramForumTopic>;
+    getFile(input: GetFileInput): Promise<TelegramFile>;
+    downloadFile(input: DownloadFileInput): Promise<Uint8Array>;
+}
+
+export interface TelegramVoiceTranscriber {
+    transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
 }
 
 export interface TelegramBridgeRouterDependencies {
     config: BridgeConfig;
     opencode: TelegramRouterOpenCodeClient;
     telegram: TelegramRouterTelegramClient;
+    transcriber?: TelegramVoiceTranscriber;
     now?: () => Date;
 }
 
@@ -87,18 +103,28 @@ export class TelegramBridgeRouter {
     private readonly config: BridgeConfig;
     private readonly opencode: TelegramRouterOpenCodeClient;
     private readonly telegram: TelegramRouterTelegramClient;
+    private readonly transcriber: TelegramVoiceTranscriber | null;
     private readonly now: () => Date;
 
     constructor(dependencies: TelegramBridgeRouterDependencies) {
         this.config = dependencies.config;
         this.opencode = dependencies.opencode;
         this.telegram = dependencies.telegram;
+        this.transcriber = dependencies.transcriber ?? null;
         this.now = dependencies.now ?? (() => new Date());
     }
 
     async handleUpdate(update: TelegramUpdate): Promise<void> {
         const message = update.message;
-        if (!message || !message.text || !this.isAllowed(message)) {
+        if (!message || !this.isAllowed(message)) {
+            return;
+        }
+        if (!message.text) {
+            if (message.audio) {
+                await this.handleAudioPrompt(message);
+                await this.react(message, TELEGRAM_REACTION_DONE);
+            }
+
             return;
         }
 
@@ -263,6 +289,54 @@ export class TelegramBridgeRouter {
         await this.telegram.sendChatAction({ chatID: message.chatID, threadID: message.threadID, action: "typing" });
         await this.opencode.sendPrompt({ sessionID: surface.activeSessionID, text });
         await this.send(message, bridgeLine(`prompt sent to ${markdownCode(surface.activeSessionID)}`));
+    }
+
+    private async handleAudioPrompt(message: TelegramMessage): Promise<void> {
+        const attachment = message.audio;
+        if (!attachment) {
+            return;
+        }
+
+        const state = await this.loadState();
+        const surface = findSurface(state, surfaceID(message));
+        if (!surface?.activeSessionID) {
+            await this.send(message, bridgePlain("no active session. Use /oc attach latest or /oc new first."));
+            return;
+        }
+        if (!this.config.voice.enabled || this.transcriber === null) {
+            await this.send(message, bridgePlain("voice transcription is disabled"));
+            return;
+        }
+
+        const format = audioFormatFromMetadata({ mimeType: attachment.mimeType, fileName: attachment.fileName });
+        if (format === null) {
+            await this.send(message, bridgePlain("unsupported audio format. Use wav, mp3, flac, m4a, ogg, webm, or aac."));
+            return;
+        }
+
+        await this.telegram.sendChatAction({ chatID: message.chatID, threadID: message.threadID, action: "typing" });
+        try {
+            enforceAudioSizeLimit(attachment.fileSize, this.config.voice.maxAudioBytes);
+            const file = await this.telegram.getFile({ fileID: attachment.fileID });
+            if (file.path === null) {
+                await this.send(message, bridgePlain("Telegram did not return a downloadable file path for this audio."));
+                return;
+            }
+            enforceAudioSizeLimit(file.size, this.config.voice.maxAudioBytes);
+            const audio = await this.telegram.downloadFile({ filePath: file.path });
+            enforceAudioSizeLimit(audio.byteLength, this.config.voice.maxAudioBytes);
+            const transcription = await this.transcriber.transcribe({ data: audio, format });
+            const text = transcription.text.trim();
+            if (text.length === 0) {
+                await this.send(message, bridgePlain("audio transcription was empty"));
+                return;
+            }
+
+            await this.opencode.sendPrompt({ sessionID: surface.activeSessionID, text });
+            await this.send(message, bridgeLine(`transcribed audio sent to ${markdownCode(surface.activeSessionID)}`));
+        } catch (error) {
+            await this.send(message, bridgeLine(`audio transcription failed: ${escapeTelegramMarkdown(audioErrorMessage(error))}`));
+        }
     }
 
     private async handleAbort(message: TelegramMessage): Promise<void> {
@@ -598,6 +672,10 @@ function bridgeField(label: string, value: string): string {
 
 function bridgeLine(text: string): string {
     return `${markdownBold("[bridge]")} ${text}`;
+}
+
+function audioErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 function markdownBold(text: string): string {

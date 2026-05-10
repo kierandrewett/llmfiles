@@ -184,7 +184,7 @@ describe("TelegramBridgeRouter", () => {
         assert.deepEqual(fixture.telegram.fileRequests, []);
         assert.deepEqual(fixture.transcriber.transcriptions, []);
         assert.deepEqual(fixture.opencode.prompts, []);
-        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* no active session\. Use /oc attach latest or /oc new first\."]);
+        assert.deepEqual(fixture.telegram.messages.map((message) => message.text), ["*\\[bridge\\]* no active session\\. Use /oc attach latest or /oc new first\\."]);
     });
 
     it("schedules prompts against the active Telegram session", async () => {
