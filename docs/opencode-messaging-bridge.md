@@ -88,16 +88,16 @@ Telegram Bot API          Discord Gateway/REST
                    v
              BridgeRouter
                    |
-          +--------+--------+
-          |                 |
-          v                 v
-   OpenCodeAdapter     BridgeStore
-          |                 |
-          v                 v
-  OpenCode HTTP/SSE     state.json
+          +--------+--------+------------------+
+          |                 |                  |
+          v                 v                  v
+   OpenCodeAdapter     BridgeStore      VoiceTranscriber
+          |                 |                  |
+          v                 v                  v
+  OpenCode HTTP/SSE     state.json      OpenRouter STT
 ```
 
-The daemon should be split into five boundaries.
+The daemon should be split into six boundaries.
 
 ### BridgeRouter
 
@@ -148,7 +148,21 @@ interface PlatformAdapter {
 }
 ```
 
-The exact TypeScript can change during implementation, but the boundary should stay small. The router should not know whether Telegram uses long polling or Discord uses a Gateway. The platform adapter should not know how OpenCode sessions are created.
+The exact TypeScript can change during implementation, but the boundary should stay small. The router should not know
+whether Telegram uses long polling or Discord uses a Gateway. The platform adapter should not know how OpenCode sessions
+are created.
+
+### VoiceTranscriber
+
+The voice transcriber owns provider-specific speech-to-text details.
+
+Responsibilities:
+
+- Stay disabled unless explicitly enabled by config.
+- Require the OpenRouter API key only when voice transcription is enabled.
+- Convert downloaded audio bytes and detected formats into the OpenRouter transcription request shape.
+- Return plain text to the platform router so the router can send it through the normal OpenCode prompt path.
+- Keep provider secrets out of logs and out of `state.json`.
 
 ### BridgeStore
 
