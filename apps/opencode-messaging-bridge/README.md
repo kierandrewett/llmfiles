@@ -6,13 +6,14 @@ This package implements the standalone bridge described in `../../docs/opencode-
 
 - environment config parsing
 - atomic JSON state storage
-- OpenCode HTTP client for health checks, session listing, session creation, prompt sends, aborts, and permission replies
+- OpenCode HTTP client for health checks, session listing, session creation, prompt sends, aborts, permission replies, and scheduled prompt runs
 - Telegram Bot API long polling, command-menu registration, reactions, MarkdownV2 text responses, and streaming previews
 - Discord Gateway, REST, slash-command, and prefix-command handling
 - allowlisted Telegram command routing for `/oc ...` subcommands and first-class menu commands such as `/status`,
-  `/sessions`, `/attach`, `/new`, `/prompt`, `/reply`, `/abort`, `/allow`, `/always`, and `/deny`
+  `/sessions`, `/attach`, `/new`, `/prompt`, `/reply`, `/abort`, `/jobs`, `/schedule`, `/unschedule`, `/run_now`,
+  `/allow`, `/always`, and `/deny`
 - OpenCode server-sent event relay for bound Telegram and Discord sessions, including Telegram draft/edit previews for
-  assistant text parts and permission prompts
+  assistant text parts, permission prompts, tool status updates, and session errors
 - optional OpenCode process supervision for `opencode serve`
 - CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
@@ -57,7 +58,8 @@ assistant text back to the bound chat or channel.
 
 The older `plugins/opencode/discord-remote-control.ts` plugin still exists and has extra plugin-specific behaviour such as
 session threads and forum intake. The standalone daemon is now the proper Docker/server path for core Discord control:
-`status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, permission replies, and assistant text relay.
+`status`, `sessions`, `attach`, `new`, `prompt`, `reply`, `abort`, scheduled prompts, permission replies, and assistant
+text relay.
 
 ## Discord quickstart
 
@@ -113,6 +115,8 @@ Smoke test from the configured Discord control channel:
 /oc sessions
 /oc new Discord smoke test
 /oc prompt what repository are you running in?
+/oc schedule every 30m summarise the current repo status
+/oc jobs
 /oc allow per_123
 /oc abort
 ```
@@ -157,9 +161,10 @@ curl -s -X POST "https://api.telegram.org/bot${OPENCODE_BRIDGE_TELEGRAM_BOT_TOKE
 ```
 
 On the first poll, the bridge calls Telegram `setMyCommands` so the bot menu exposes `/status`, `/sessions`, `/attach`,
-`/new`, `/prompt`, `/reply`, `/abort`, `/allow`, `/always`, and `/deny`. The older `/oc ...` form still works, which is
-useful in groups where you want one command namespace. Bridge-generated responses use Telegram MarkdownV2 and successful
-commands get a best-effort reaction. Reaction failures from Telegram are ignored so command handling still completes.
+`/new`, `/prompt`, `/reply`, `/abort`, `/jobs`, `/schedule`, `/unschedule`, `/run_now`, `/allow`, `/always`, and `/deny`.
+The older `/oc ...` form still works, which is useful in groups where you want one command namespace. Bridge-generated
+responses use Telegram MarkdownV2 and successful commands get a best-effort reaction. Reaction failures from Telegram are
+ignored so command handling still completes.
 
 For assistant output, the bridge uses Telegram's newer AI-agent path where it can. Private chats receive ephemeral
 `sendMessageDraft` updates while OpenCode is still generating, followed by a final persisted `sendMessage` when the session
@@ -175,6 +180,8 @@ Send these messages to the allowlisted Telegram chat:
 /status
 /oc new Docker bridge smoke test
 /oc prompt what repository are you running in?
+/oc schedule every 30m summarise the current session state
+/oc jobs
 /oc allow per_123
 /oc abort
 ```
@@ -187,6 +194,8 @@ Expected result:
 - If `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1`, `/oc new` creates a Telegram topic first and binds the session to that
   topic. Existing topic commands keep binding to the topic they were sent from.
 - `/oc prompt` sends text to the bound OpenCode session.
+- `/oc schedule every 30m ...` creates a durable scheduled prompt for the session that is active in this chat.
+- `/oc jobs`, `/oc run-now <job-id>`, and `/oc unschedule <job-id>` inspect, run, and remove scheduled prompts for this chat.
 - When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
   `/oc allow <permission-id>`, `/oc always <permission-id>`, or `/oc deny <permission-id> [feedback]`.
 - Assistant text is relayed back into Telegram from the OpenCode event stream using MarkdownV2-safe escaping. Private chats
@@ -254,6 +263,8 @@ Then smoke test from Discord:
 /oc sessions
 /oc new Discord smoke test
 /oc prompt what repository are you running in?
+/oc schedule every 30m summarise the current session state
+/oc jobs
 /oc allow per_123
 /oc abort
 ```
@@ -264,6 +275,7 @@ If you enabled `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1`, prefix comman
 !oc status
 !oc new Discord daemon smoke test
 !oc prompt what repository are you running in?
+!oc schedule every 30m summarise the current session state
 !oc deny per_123 not safe
 ```
 
@@ -272,6 +284,8 @@ Expected result:
 - `/oc status` reports OpenCode health and the active Discord channel session.
 - `/oc new` creates and binds a session to that Discord channel.
 - `/oc prompt` sends text to the bound OpenCode session.
+- `/oc schedule every 30m ...` creates a durable scheduled prompt for the session that is active in this channel.
+- `/oc jobs`, `/oc run-now <job-id>`, and `/oc unschedule <job-id>` inspect, run, and remove scheduled prompts for this channel.
 - When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
   `/oc allow <permission-id>`, `/oc always <permission-id>`, or `/oc deny <permission-id> [feedback]`.
 - Assistant text is relayed back into Discord from the OpenCode event stream.
@@ -344,6 +358,7 @@ yarn start discord-once
 yarn start discord
 yarn start telegram+discord-once
 yarn start telegram+discord
+yarn start automation-once
 yarn check
 ```
 
@@ -359,6 +374,23 @@ output can be sent back to Discord.
 bridge process with one managed `opencode serve` process and one OpenCode event relay for both Telegram and Discord
 bindings. Keep both token blocks in the runtime env file when you use the combined command.
 
+`automation-once` runs due scheduled prompts once and exits. The continuous `telegram`, `discord`, and `telegram+discord`
+commands run the same scheduler loop every 30 seconds. Each scheduled prompt targets the OpenCode session that was active
+when the job was created. Missed intervals do not catch up in a burst after downtime; the next run is calculated from the
+time the job is processed.
+
+Chat commands for schedules:
+
+```text
+/oc schedule every 30m summarise the current session state
+/oc jobs
+/oc run-now job_20260509T000000000Z_1
+/oc unschedule job_20260509T000000000Z_1
+```
+
+Durations support `m`, `h`, and `d`, with a minimum of `5m` and a maximum of `7d`. Discord prefix commands use the same
+arguments, for example `!oc schedule every 2h check for failed tests`.
+
 The state file defaults to:
 
 ```text
@@ -371,7 +403,8 @@ If `XDG_STATE_HOME` is not set, it falls back to:
 $HOME/.local/state/opencode-messaging-bridge/state.json
 ```
 
-The state file stores routing state only. Do not put tokens, OpenCode passwords, API keys, or other secrets in it.
+The state file stores routing state, scheduled prompt jobs, and platform resume metadata only. Do not put tokens, OpenCode
+passwords, API keys, or other secrets in it.
 
 ## Docker
 
@@ -527,8 +560,8 @@ docker logs -f opencode-bridge
 ```
 
 The bridge state lives in the `opencode-bridge-state` Docker volume because the image sets `XDG_STATE_HOME=/state`.
-That state stores Telegram offsets, Discord Gateway resume metadata, slash-command registration signatures, and
-chat/channel-to-session bindings. It must not contain bot tokens or OpenCode credentials.
+That state stores Telegram offsets, Discord Gateway resume metadata, slash-command registration signatures,
+chat/channel-to-session bindings, and scheduled prompt jobs. It must not contain bot tokens or OpenCode credentials.
 
 OpenCode provider credentials are separate. OpenCode stores credentials created through `/connect` in
 `~/.local/share/opencode/auth.json`, so ChatGPT Plus/Pro and OpenCode Go credentials should be prepared on the host and

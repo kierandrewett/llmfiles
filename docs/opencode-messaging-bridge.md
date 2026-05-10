@@ -1,7 +1,8 @@
 # OpenCode messaging bridge plan
 
-Status: design note with Phase 1, Telegram command routing/output, Discord Gateway/REST command routing/output, optional
-managed OpenCode process support, and Docker Compose runtime support in place, May 2026.
+Status: design note with Phase 1, Telegram command routing/output, Discord Gateway/REST command routing/output, richer
+OpenCode event relay, bridge-native permission replies, scheduled prompt automation, optional managed OpenCode process
+support, and Docker Compose runtime support in place, May 2026.
 
 This document defines a standalone, always-on messaging bridge for OpenCode. It is the next step after the Discord remote-control plugin prototype. The plugin proved the UX and the platform edge cases, but it also showed the wrong lifecycle: a plugin attached to an OpenCode worker can exit before slow Discord retries, thread recovery, or cross-platform routing has finished.
 
@@ -13,6 +14,7 @@ The bridge should run as its own daemon and treat OpenCode, Telegram, and Discor
 - Let a messaging platform create a new OpenCode session.
 - Let a messaging platform attach to an existing manually-created OpenCode session.
 - Relay OpenCode assistant text, reasoning parts exposed by OpenCode, important tool events, permission requests, and errors back to the mapped platform surface.
+- Let an allowlisted user schedule repeated prompts against an explicitly bound OpenCode session.
 - Keep platform-specific state durable across daemon restarts.
 - Avoid storing secrets in state or git.
 - Avoid relying on Discord creating a large number of threads.
@@ -202,11 +204,32 @@ Draft schema:
       "updatedAt": "2026-05-09T00:00:00.000Z"
     }
   ],
+  "jobs": [
+    {
+      "id": "job_20260509T000000000Z_1",
+      "platform": "telegram",
+      "surfaceID": "telegram:12345:",
+      "surface": {
+        "chatID": "12345",
+        "threadID": null
+      },
+      "sessionID": "ses_abc",
+      "prompt": "summarise the current session state",
+      "intervalMinutes": 30,
+      "nextRunAt": "2026-05-09T00:30:00.000Z",
+      "lastRunAt": null,
+      "lastError": null,
+      "createdAt": "2026-05-09T00:00:00.000Z",
+      "updatedAt": "2026-05-09T00:00:00.000Z"
+    }
+  ],
   "deliveries": []
 }
 ```
 
-`deliveries` can start as an empty array and become a bounded outbox if platform sends need retry. The important part is that platform offsets and session bindings are not held only in memory.
+`jobs` is optional when reading old state files and defaults to an empty list. `deliveries` can start as an empty array and
+become a bounded outbox if platform sends need retry. The important part is that platform offsets, scheduled jobs, and
+session bindings are not held only in memory.
 
 ### ConfigLoader
 
@@ -255,6 +278,10 @@ MVP commands:
 - `/oc new [title]` - create a new session and bind this chat or topic.
 - `/oc prompt <text>` or `/oc reply <text>` - send a prompt to the bound session.
 - `/oc abort` - abort the bound session.
+- `/oc jobs` - list scheduled prompts for this chat or topic.
+- `/oc schedule every <duration> <text>` - schedule a prompt for the active session.
+- `/oc run-now <job-id>` - run a scheduled prompt immediately.
+- `/oc unschedule <job-id>` - remove a scheduled prompt.
 - `/oc allow <request-id>`, `/oc always <request-id>`, `/oc deny <request-id>` - answer permission requests.
 
 Plain text can be treated as a reply only when exactly one session is bound to the chat or topic and `OPENCODE_BRIDGE_IMPLICIT_REPLY=1` is set. Otherwise the bridge should ask for an explicit `/oc attach` or `/oc reply`.
@@ -303,6 +330,23 @@ The bridge should ignore noisy or unsafe raw events and relay a small set of dur
 | `session.idle` / `session.status` | Mark with reactions or low-key status updates. Avoid chat spam. |
 | tool result parts | Suppress routine read/search/list success. Relay important or failed tools as compact lines. |
 | `session.error` | Relay a concise error to every bound surface. |
+
+## Scheduled prompt automation
+
+Scheduled prompts are deliberately simple in the first implementation:
+
+- Jobs are created only by allowlisted Telegram or Discord users.
+- A job targets the OpenCode session that was active in the chat or channel at creation time.
+- The schedule syntax is `every <duration> <prompt>`, where duration supports minutes, hours, or days.
+- The bridge accepts intervals from `5m` to `7d`.
+- Due jobs are checked every 30 seconds in the continuous bridge commands.
+- `automation-once` runs due jobs once, which is useful for debugging or a separate cron-style setup.
+- Missed intervals do not catch up in a burst after downtime. The next run is calculated from the time the bridge processes the job.
+- The runner records `lastRunAt`, `lastError`, and `nextRunAt` in the JSON state file.
+
+This keeps automation deterministic and reviewable without inventing a separate job queue. If schedules need cron syntax,
+per-job model choices, or conditional execution later, those should be added as explicit state fields rather than hidden
+prompt conventions.
 
 ## Session resolution rules
 
@@ -469,9 +513,9 @@ Verification:
 
 ## Next steps
 
-Phase 1, Telegram control, Discord control, managed process supervision, and Docker Compose packaging now live in
-`llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to smoke test the real runtimes and fill the
-remaining event-fidelity gaps:
+Phase 1, Telegram control, Discord control, managed process supervision, event relay, permission replies, scheduled prompt
+automation, and Docker Compose packaging now live in `llmfiles/apps/opencode-messaging-bridge/`. The next implementation
+step is to smoke test the real runtimes and decide the voice path:
 
 - smoke test the continuous `discord` command against the private Discord control channel, once with an external
   `opencode serve` and once through Docker Compose with `OPENCODE_BRIDGE_COMMAND=discord`
@@ -480,8 +524,7 @@ remaining event-fidelity gaps:
 - build and run the Docker image with mounted `~/.local/share/opencode`, mounted `~/.config/opencode`, a
   project workdir mount, and a private bridge env file
 - decide whether reasoning parts should be sent by default or gated behind a config flag
-- add compact handling for session errors and important failed tool events
-- keep permission request commands deferred to Phase 3 unless the OpenCode event slice exposes a clean endpoint during
-  implementation
+- smoke test `/oc schedule`, `/oc jobs`, `/oc run-now`, and `/oc unschedule` from Telegram and Discord
+- choose an opt-in voice transcription hook without storing provider secrets in bridge state
 
 The dedicated-repo option can stay deferred until the daemon has Telegram and Discord parity. Keeping the first implementation in `llmfiles` is still the smallest reversible step.
