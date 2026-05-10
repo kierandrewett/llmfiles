@@ -364,7 +364,11 @@ function discordGateway(
     const opencode = new OpenCodeHttpClient({ baseUrl: config.opencode.baseUrl });
     const discord = new DiscordBotApiClient({ botToken, maxMessageChars: config.discord.maxMessageChars });
     const transcriber = voiceTranscriber(config);
+    const intentResolver = intentResolverRunner(config, opencode);
     const routerDependencies: ConstructorParameters<typeof DiscordBridgeRouter>[0] = { config, opencode, discord };
+    if (intentResolver) {
+        routerDependencies.intentResolver = intentResolver;
+    }
     if (transcriber) {
         routerDependencies.transcriber = transcriber;
     }

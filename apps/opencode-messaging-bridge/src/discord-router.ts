@@ -335,6 +335,218 @@ export class DiscordBridgeRouter {
         }
     }
 
+    private async handleComponentInteraction(interaction: DiscordInteraction): Promise<void> {
+        if (!interaction.userID || !this.isAllowedUser(interaction.userID)) {
+            await this.respondInteraction(interaction, "This Discord user is not allowed to control OpenCode.", true);
+            return;
+        }
+        if (!interaction.channelID || !(await this.isAllowedChannel(interaction.channelID))) {
+            await this.respondInteraction(interaction, "Use this component in the configured OpenCode control channel.", true);
+            return;
+        }
+
+        const parsed = parseIntentComponentData(interaction.data);
+        if (!parsed) {
+            await this.respondInteraction(interaction, "Unknown action", true);
+            return;
+        }
+
+        const state = await this.loadState();
+        const pending = state.intentResolvers.find((entry) => entry.id === parsed.resolverID);
+        if (!pending || pending.platform !== "discord" || pending.surfaceID !== surfaceID(interaction.channelID) || pending.userID !== interaction.userID) {
+            await this.respondInteraction(interaction, "That clarification expired", true);
+            return;
+        }
+        if (resolverExpired(pending, this.now())) {
+            removeIntentResolver(state, pending.id);
+            state.updatedAt = this.now().toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.respondInteraction(interaction, "That clarification expired", true);
+            return;
+        }
+
+        const option = pending.options[parsed.optionIndex];
+        if (!option) {
+            await this.respondInteraction(interaction, "That option is no longer available", true);
+            return;
+        }
+
+        await this.respondInteraction(interaction, "Working on it", true);
+        await this.continueIntentResolver({
+            channelID: interaction.channelID,
+            userID: interaction.userID,
+            pending,
+            answer: option.value ?? option.label,
+        });
+    }
+
+    private async handlePendingResolverText(channelID: string, userID: string, text: string): Promise<boolean> {
+        const state = await this.loadState();
+        const pending = findPendingIntentResolver(state, "discord", surfaceID(channelID), userID);
+        if (!pending) {
+            return false;
+        }
+        if (resolverExpired(pending, this.now())) {
+            removeIntentResolver(state, pending.id);
+            state.updatedAt = this.now().toISOString();
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(channelID, "[bridge] that clarification expired. Send the intent again to restart.");
+            return true;
+        }
+        if (!pending.allowFreeText) {
+            await this.send(channelID, "[bridge] use the select menu for this clarification.");
+            return true;
+        }
+
+        await this.continueIntentResolver({ channelID, userID, pending, answer: text });
+        return true;
+    }
+
+    private async handleIntentResolverStart(channelID: string, userID: string, text: string): Promise<void> {
+        const resolver = this.intentResolver;
+        const workspaceRoot = this.config.workspace.root;
+        if (!resolver || workspaceRoot === null) {
+            await this.send(channelID, "[bridge] intent resolver is not configured");
+            return;
+        }
+
+        await this.discord.sendTyping({ channelID });
+        const result = await resolver.start({ text, workspaceRoot });
+        await this.handleIntentResolverOutput({
+            channelID,
+            userID,
+            resolverSessionID: result.resolverSessionID,
+            output: result.output,
+            workspaceRoot,
+            originalText: text,
+            pending: null,
+        });
+    }
+
+    private async continueIntentResolver(input: { channelID: string; userID: string; pending: BridgeIntentResolverState; answer: string }): Promise<void> {
+        const resolver = this.intentResolver;
+        if (!resolver) {
+            await this.send(input.channelID, "[bridge] intent resolver is not configured");
+            return;
+        }
+
+        await this.discord.sendTyping({ channelID: input.channelID });
+        const result = await resolver.continue({
+            resolverSessionID: input.pending.resolverSessionID,
+            answer: input.answer,
+            workspaceRoot: input.pending.workspaceRoot,
+        });
+        await this.handleIntentResolverOutput({
+            channelID: input.channelID,
+            userID: input.userID,
+            resolverSessionID: result.resolverSessionID,
+            output: result.output,
+            workspaceRoot: input.pending.workspaceRoot,
+            originalText: input.pending.originalText,
+            pending: input.pending,
+        });
+    }
+
+    private async handleIntentResolverOutput(input: {
+        channelID: string;
+        userID: string;
+        resolverSessionID: string;
+        output: IntentResolverOutput;
+        workspaceRoot: string;
+        originalText: string;
+        pending: BridgeIntentResolverState | null;
+    }): Promise<void> {
+        const output = input.output;
+        if (output.status === "needs_clarification") {
+            await this.storeAndSendClarification({ ...input, output });
+            return;
+        }
+        if (output.status === "cannot_resolve") {
+            if (input.pending) {
+                await this.removePendingResolver(input.pending.id);
+            }
+            await this.send(input.channelID, `[bridge] could not resolve intent: ${output.reason}`);
+            return;
+        }
+
+        if (input.pending) {
+            await this.removePendingResolver(input.pending.id);
+        }
+        await this.startResolvedIntentSession(input.channelID, output);
+    }
+
+    private async storeAndSendClarification(input: {
+        channelID: string;
+        userID: string;
+        resolverSessionID: string;
+        output: Extract<IntentResolverOutput, { status: "needs_clarification" }>;
+        workspaceRoot: string;
+        originalText: string;
+        pending: BridgeIntentResolverState | null;
+    }): Promise<void> {
+        const state = await this.loadState();
+        const timestamp = this.now().toISOString();
+        const turnCount = (input.pending?.turnCount ?? 0) + 1;
+        if (turnCount > this.config.intentResolver.maxClarificationTurns) {
+            if (input.pending) {
+                removeIntentResolver(state, input.pending.id);
+            }
+            state.updatedAt = timestamp;
+            await writeBridgeState(this.config.statePath, state);
+            await this.send(input.channelID, "[bridge] intent resolver reached the clarification limit. Send the intent again with more detail.");
+            return;
+        }
+
+        const pending: BridgeIntentResolverState = {
+            id: input.pending?.id ?? createIntentResolverID(state, this.now()),
+            platform: "discord",
+            surfaceID: surfaceID(input.channelID),
+            surface: surfaceAddress(input.channelID),
+            userID: input.userID,
+            resolverSessionID: input.resolverSessionID,
+            workspaceRoot: input.workspaceRoot,
+            originalText: input.originalText,
+            turnCount,
+            maxTurns: this.config.intentResolver.maxClarificationTurns,
+            expiresAt: new Date(this.now().getTime() + this.config.intentResolver.clarificationTtlMs).toISOString(),
+            lastQuestion: input.output.question,
+            allowFreeText: input.output.allowFreeText,
+            options: input.output.options.map((option) => option.value === undefined
+                ? { id: option.id, label: option.label }
+                : { id: option.id, label: option.label, value: option.value }),
+            createdAt: input.pending?.createdAt ?? timestamp,
+            updatedAt: timestamp,
+        };
+
+        upsertIntentResolver(state, pending);
+        state.updatedAt = timestamp;
+        await writeBridgeState(this.config.statePath, state);
+        await this.sendClarification(input.channelID, pending);
+    }
+
+    private async startResolvedIntentSession(channelID: string, output: IntentResolverReadyOutput): Promise<void> {
+        const sessionInput: { title?: string; directory?: string } = { directory: output.path };
+        if (output.title !== null) {
+            sessionInput.title = output.title;
+        }
+
+        const session = await this.opencode.createSession(sessionInput);
+        await this.bind(channelID, session);
+        await this.opencode.sendPrompt({ sessionID: session.id, text: output.prompt, directory: output.path });
+        await this.send(channelID, `[bridge] resolved ${formatSessionLine(session)} at ${output.path}; prompt sent`);
+    }
+
+    private async sendClarification(channelID: string, pending: BridgeIntentResolverState): Promise<void> {
+        await this.send(channelID, `[bridge] ${pending.lastQuestion}`, { components: clarificationComponents(pending) });
+    }
+
+    private async removePendingResolver(id: string): Promise<void> {
+        const state = await this.loadState();
+        removeIntentResolver(state, id);
+        state.updatedAt = this.now().toISOString();
+        await writeBridgeState(this.config.statePath, state);
+    }
+
     private async handleAbort(channelID: string): Promise<void> {
         const state = await this.loadState();
         const surface = findSurface(state, surfaceID(channelID));
@@ -506,8 +718,13 @@ export class DiscordBridgeRouter {
         await writeBridgeState(this.config.statePath, state);
     }
 
-    private async send(channelID: string, content: string): Promise<void> {
-        await this.discord.sendMessage({ channelID, content });
+    private async send(channelID: string, content: string, options: { components?: DiscordMessageComponent[] } = {}): Promise<void> {
+        const input: SendDiscordMessageInput = { channelID, content };
+        if (options.components && options.components.length > 0) {
+            input.components = options.components;
+        }
+
+        await this.discord.sendMessage(input);
     }
 
     private async respondInteraction(interaction: DiscordInteraction, content: string, ephemeral: boolean): Promise<void> {
@@ -662,6 +879,92 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
 
 function jobsForSurface(state: BridgeState, id: string): BridgeScheduledJobState[] {
     return state.jobs.filter((job) => job.surfaceID === id);
+}
+
+function findPendingIntentResolver(state: BridgeState, platform: "discord", id: string, userID: string): BridgeIntentResolverState | undefined {
+    return state.intentResolvers.find((entry) => entry.platform === platform && entry.surfaceID === id && entry.userID === userID);
+}
+
+function upsertIntentResolver(state: BridgeState, resolver: BridgeIntentResolverState): void {
+    const index = state.intentResolvers.findIndex((entry) => entry.id === resolver.id);
+    if (index === -1) {
+        state.intentResolvers.push(resolver);
+        return;
+    }
+
+    state.intentResolvers[index] = resolver;
+}
+
+function removeIntentResolver(state: BridgeState, id: string): void {
+    const index = state.intentResolvers.findIndex((entry) => entry.id === id);
+    if (index !== -1) {
+        state.intentResolvers.splice(index, 1);
+    }
+}
+
+function createIntentResolverID(state: BridgeState, now: Date): string {
+    return `ir_${now.getTime().toString(36)}_${(state.intentResolvers.length + 1).toString(36)}`;
+}
+
+function resolverExpired(resolver: BridgeIntentResolverState, now: Date): boolean {
+    const expiresAt = Date.parse(resolver.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt <= now.getTime();
+}
+
+function clarificationComponents(pending: BridgeIntentResolverState): DiscordMessageComponent[] {
+    if (pending.options.length === 0) {
+        return [];
+    }
+
+    return [
+        {
+            type: DISCORD_COMPONENT_ACTION_ROW,
+            components: [
+                {
+                    type: DISCORD_COMPONENT_STRING_SELECT,
+                    custom_id: intentSelectCustomID(pending.id),
+                    placeholder: DISCORD_SELECT_PLACEHOLDER,
+                    min_values: 1,
+                    max_values: 1,
+                    options: pending.options.map((option, index) => ({
+                        label: truncateDiscordComponentText(option.label, DISCORD_SELECT_LABEL_LIMIT),
+                        value: index.toString(36),
+                    })),
+                },
+            ],
+        },
+    ];
+}
+
+function intentSelectCustomID(resolverID: string): string {
+    return `${DISCORD_INTENT_COMPONENT_PREFIX}:${resolverID}`;
+}
+
+function parseIntentComponentData(data: DiscordInteraction["data"]): { resolverID: string; optionIndex: number } | null {
+    const customID = data?.customID;
+    if (!customID) {
+        return null;
+    }
+
+    const parts = customID.split(":");
+    if (parts.length !== 2 && parts.length !== 3) {
+        return null;
+    }
+    if (parts[0] !== DISCORD_INTENT_COMPONENT_PREFIX || !parts[1]) {
+        return null;
+    }
+
+    const optionValue = parts.length === 3 ? parts[2] : data.values[0];
+    const optionIndex = Number.parseInt(optionValue ?? "", 36);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) {
+        return null;
+    }
+
+    return { resolverID: parts[1], optionIndex };
+}
+
+function truncateDiscordComponentText(value: string, limit: number): string {
+    return Array.from(value).slice(0, limit).join("") || "Option";
 }
 
 function firstAudioAttachment(attachments: DiscordAttachment[]): DiscordAttachment | null {

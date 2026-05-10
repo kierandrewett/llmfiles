@@ -662,6 +662,7 @@ function interaction(
         data: {
             name: "oc",
             type: 1,
+            values: [],
             options: [
                 {
                     name: subcommand,
