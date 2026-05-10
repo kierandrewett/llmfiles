@@ -412,6 +412,14 @@ function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeCo
             messageContentIntent: false,
             maxMessageChars: 1850,
         },
+        workspace: {
+            root: null,
+        },
+        intentResolver: {
+            enabled: false,
+            maxClarificationTurns: 4,
+            clarificationTtlMs: 600000,
+        },
         voice: {
             enabled: options.voiceEnabled ?? false,
             maxAudioBytes: 20971520,

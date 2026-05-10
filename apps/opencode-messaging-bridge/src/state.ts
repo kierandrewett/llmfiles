@@ -45,6 +45,30 @@ export interface BridgeScheduledJobState {
     updatedAt: string;
 }
 
+export interface BridgeIntentResolverClarificationOptionState {
+    id: string;
+    label: string;
+    value?: string;
+}
+
+export interface BridgeIntentResolverState {
+    id: string;
+    platform: BridgePlatform;
+    surfaceID: string;
+    surface: BridgeSurfaceAddress;
+    userID: string;
+    resolverSessionID: string;
+    workspaceRoot: string;
+    originalText: string;
+    turnCount: number;
+    maxTurns: number;
+    expiresAt: string;
+    lastQuestion: string;
+    options: BridgeIntentResolverClarificationOptionState[];
+    createdAt: string;
+    updatedAt: string;
+}
+
 export interface BridgeState {
     version: 1;
     updatedAt: string;
@@ -61,6 +85,7 @@ export interface BridgeState {
     surfaces: BridgeSurfaceState[];
     bindings: BridgeBindingState[];
     jobs: BridgeScheduledJobState[];
+    intentResolvers: BridgeIntentResolverState[];
     deliveries: Record<string, unknown>[];
 }
 
@@ -81,6 +106,7 @@ export function createDefaultBridgeState(now = new Date()): BridgeState {
         surfaces: [],
         bindings: [],
         jobs: [],
+        intentResolvers: [],
         deliveries: [],
     };
 }
@@ -148,6 +174,7 @@ function parseBridgeState(value: unknown, source: string): BridgeState {
         surfaces: requireArray(record.surfaces, `${source}.surfaces`).map((entry, index) => parseSurfaceState(entry, `${source}.surfaces[${index}]`)),
         bindings: requireArray(record.bindings, `${source}.bindings`).map((entry, index) => parseBindingState(entry, `${source}.bindings[${index}]`)),
         jobs: readOptionalArray(record.jobs, `${source}.jobs`).map((entry, index) => parseScheduledJobState(entry, `${source}.jobs[${index}]`)),
+        intentResolvers: readOptionalArray(record.intentResolvers, `${source}.intentResolvers`).map((entry, index) => parseIntentResolverState(entry, `${source}.intentResolvers[${index}]`)),
         deliveries: requireArray(record.deliveries, `${source}.deliveries`).map((entry, index) => requireRecord(entry, `${source}.deliveries[${index}]`)),
     };
 }
@@ -196,6 +223,42 @@ function parseScheduledJobState(value: unknown, source: string): BridgeScheduled
         createdAt: requireString(record.createdAt, `${source}.createdAt`),
         updatedAt: requireString(record.updatedAt, `${source}.updatedAt`),
     };
+}
+
+function parseIntentResolverState(value: unknown, source: string): BridgeIntentResolverState {
+    const record = requireRecord(value, source);
+
+    return {
+        id: requireString(record.id, `${source}.id`),
+        platform: requirePlatform(record.platform, `${source}.platform`),
+        surfaceID: requireString(record.surfaceID, `${source}.surfaceID`),
+        surface: parseSurfaceAddress(record.surface, `${source}.surface`),
+        userID: requireString(record.userID, `${source}.userID`),
+        resolverSessionID: requireString(record.resolverSessionID, `${source}.resolverSessionID`),
+        workspaceRoot: requireString(record.workspaceRoot, `${source}.workspaceRoot`),
+        originalText: requireString(record.originalText, `${source}.originalText`),
+        turnCount: requirePositiveInteger(record.turnCount, `${source}.turnCount`),
+        maxTurns: requirePositiveInteger(record.maxTurns, `${source}.maxTurns`),
+        expiresAt: requireString(record.expiresAt, `${source}.expiresAt`),
+        lastQuestion: requireString(record.lastQuestion, `${source}.lastQuestion`),
+        options: requireArray(record.options, `${source}.options`).map((entry, index) => parseIntentResolverOptionState(entry, `${source}.options[${index}]`)),
+        createdAt: requireString(record.createdAt, `${source}.createdAt`),
+        updatedAt: requireString(record.updatedAt, `${source}.updatedAt`),
+    };
+}
+
+function parseIntentResolverOptionState(value: unknown, source: string): BridgeIntentResolverClarificationOptionState {
+    const record = requireRecord(value, source);
+    const option: BridgeIntentResolverClarificationOptionState = {
+        id: requireString(record.id, `${source}.id`),
+        label: requireString(record.label, `${source}.label`),
+    };
+    const optionValue = readOptionalString(record.value, `${source}.value`);
+    if (optionValue !== undefined) {
+        option.value = optionValue;
+    }
+
+    return option;
 }
 
 function parseSurfaceAddress(value: unknown, source: string): BridgeSurfaceAddress {

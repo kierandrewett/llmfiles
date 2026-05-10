@@ -10,6 +10,8 @@ const DEFAULT_DISCORD_MAX_MESSAGE_CHARS = 1850;
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL = "openai/whisper-1";
 const DEFAULT_VOICE_MAX_AUDIO_BYTES = 20 * 1024 * 1024;
+const DEFAULT_INTENT_RESOLVER_MAX_TURNS = 4;
+const DEFAULT_INTENT_RESOLVER_TTL_MS = 10 * 60 * 1000;
 const STATE_DIR_NAME = "opencode-messaging-bridge";
 const STATE_FILE_NAME = "state.json";
 
@@ -49,6 +51,14 @@ export interface BridgeConfig {
         slashResponsesEphemeral: boolean;
         messageContentIntent: boolean;
         maxMessageChars: number;
+    };
+    workspace: {
+        root: string | null;
+    };
+    intentResolver: {
+        enabled: boolean;
+        maxClarificationTurns: number;
+        clarificationTtlMs: number;
     };
     voice: {
         enabled: boolean;
@@ -102,6 +112,11 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
     const telegramBotToken = readSecret(env.OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN);
     const discordBotToken = readSecret(env.OPENCODE_BRIDGE_DISCORD_BOT_TOKEN);
     const discordControlChannelID = readOptionalString(env.OPENCODE_BRIDGE_DISCORD_CONTROL_CHANNEL_ID);
+    const workspaceRoot = readOptionalAbsolutePath(env.OPENCODE_BRIDGE_WORKSPACE_ROOT, "OPENCODE_BRIDGE_WORKSPACE_ROOT");
+    const intentResolverEnabled = parseBoolean(env.OPENCODE_BRIDGE_INTENT_RESOLVER);
+    if (intentResolverEnabled && workspaceRoot === null) {
+        throw new Error("OPENCODE_BRIDGE_WORKSPACE_ROOT must be set when OPENCODE_BRIDGE_INTENT_RESOLVER is enabled");
+    }
     const voiceEnabled = parseBoolean(env.OPENCODE_BRIDGE_VOICE_TRANSCRIPTION);
     const openrouterApiKey = readSecret(env.OPENCODE_BRIDGE_OPENROUTER_API_KEY);
     if (voiceEnabled && openrouterApiKey === null) {
@@ -140,6 +155,26 @@ export function loadBridgeConfig(env: Env = process.env): BridgeConfig {
                 500,
                 1990,
                 "OPENCODE_BRIDGE_DISCORD_MAX_MESSAGE_CHARS",
+            ),
+        },
+        workspace: {
+            root: workspaceRoot,
+        },
+        intentResolver: {
+            enabled: intentResolverEnabled,
+            maxClarificationTurns: parseIntegerInRange(
+                env.OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS,
+                DEFAULT_INTENT_RESOLVER_MAX_TURNS,
+                1,
+                10,
+                "OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS",
+            ),
+            clarificationTtlMs: parseIntegerInRange(
+                env.OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS,
+                DEFAULT_INTENT_RESOLVER_TTL_MS,
+                1000,
+                86400000,
+                "OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS",
             ),
         },
         voice: {
@@ -318,6 +353,18 @@ function readSecret(value: string | undefined): string | null {
 function readOptionalString(value: string | undefined): string | null {
     const trimmed = value?.trim();
     return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function readOptionalAbsolutePath(value: string | undefined, envName: string): string | null {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+        return null;
+    }
+    if (!path.isAbsolute(trimmed)) {
+        throw new Error(`${envName} must be an absolute path`);
+    }
+
+    return path.resolve(trimmed);
 }
 
 function readOptionalNoWhitespace(value: string | undefined, envName: string): string | null {
