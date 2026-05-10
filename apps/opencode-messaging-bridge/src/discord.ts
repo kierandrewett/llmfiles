@@ -41,9 +41,12 @@ export interface DiscordInteractionOption {
 }
 
 export interface DiscordInteractionData {
-    name: string;
-    type: number;
+    name?: string;
+    type?: number;
     options: DiscordInteractionOption[];
+    customID?: string;
+    componentType?: number;
+    values: string[];
 }
 
 export interface DiscordInteraction {
@@ -63,6 +66,7 @@ export interface DiscordGatewayBotInfo {
 export interface SendDiscordMessageInput {
     channelID: string;
     content: string;
+    components?: DiscordMessageComponent[];
 }
 
 export interface SendDiscordInteractionMessageInput {
@@ -70,6 +74,26 @@ export interface SendDiscordInteractionMessageInput {
     interactionToken: string;
     content: string;
     ephemeral: boolean;
+    components?: DiscordMessageComponent[];
+}
+
+export interface DiscordMessageComponent {
+    type: number;
+    components?: DiscordMessageComponent[];
+    custom_id?: string;
+    label?: string;
+    style?: number;
+    placeholder?: string;
+    min_values?: number;
+    max_values?: number;
+    options?: DiscordSelectOption[];
+    disabled?: boolean;
+}
+
+export interface DiscordSelectOption {
+    label: string;
+    value: string;
+    description?: string;
 }
 
 export interface PongDiscordInteractionInput {
@@ -120,10 +144,10 @@ export class DiscordBotApiClient {
     }
 
     async sendMessage(input: SendDiscordMessageInput): Promise<void> {
-        for (const chunk of chunkDiscordText(input.content, this.maxMessageChars)) {
+        for (const [index, chunk] of chunkDiscordText(input.content, this.maxMessageChars).entries()) {
             await this.request(`/channels/${encodeURIComponent(input.channelID)}/messages`, {
                 method: "POST",
-                body: discordMessageBody(chunk),
+                body: discordMessageBody(chunk, index === 0 ? input.components : undefined),
             });
         }
     }
@@ -134,17 +158,18 @@ export class DiscordBotApiClient {
 
     async sendInteractionMessage(input: SendDiscordInteractionMessageInput): Promise<void> {
         const [chunk = input.content] = chunkDiscordText(input.content, this.maxMessageChars);
+        const data = discordMessageBody(chunk, input.components);
+        if (input.ephemeral) {
+            data.flags = DISCORD_EPHEMERAL_MESSAGE_FLAG;
+        }
+
         await this.request(
             `/interactions/${encodeURIComponent(input.interactionID)}/${encodeURIComponent(input.interactionToken)}/callback`,
             {
                 method: "POST",
                 body: {
                     type: DISCORD_INTERACTION_RESPONSE_CHANNEL_MESSAGE,
-                    data: {
-                        content: chunk,
-                        flags: input.ephemeral ? DISCORD_EPHEMERAL_MESSAGE_FLAG : undefined,
-                        allowed_mentions: { parse: [] },
-                    },
+                    data,
                 },
                 auth: false,
             },
@@ -293,11 +318,16 @@ export function chunkDiscordText(text: string, limit = DISCORD_MESSAGE_LIMIT): s
     return chunks;
 }
 
-export function discordMessageBody(content: string): Record<string, unknown> {
-    return {
+export function discordMessageBody(content: string, components?: DiscordMessageComponent[]): Record<string, unknown> {
+    const body: Record<string, unknown> = {
         content,
         allowed_mentions: { parse: [] },
     };
+    if (components && components.length > 0) {
+        body.components = components;
+    }
+
+    return body;
 }
 
 export function parseDiscordMessage(value: unknown, source = "Discord message"): DiscordMessage {
@@ -363,14 +393,31 @@ function interactionUserID(record: Record<string, unknown>, source: string): str
 
 function parseInteractionData(value: unknown, source: string): DiscordInteractionData {
     const record = requireRecord(value, source);
-
-    return {
-        name: requireString(record.name, `${source}.name`),
-        type: requireNumber(record.type, `${source}.type`),
+    const data: DiscordInteractionData = {
         options: record.options === undefined
             ? []
             : requireArray(record.options, `${source}.options`).map((entry, index) => parseInteractionOption(entry, `${source}.options[${String(index)}]`)),
+        values: parseStringArray(record.values, `${source}.values`),
     };
+
+    const name = readString(record.name, `${source}.name`);
+    if (name !== null) {
+        data.name = name;
+    }
+    const type = readNumber(record.type, `${source}.type`);
+    if (type !== null) {
+        data.type = type;
+    }
+    const customID = readString(record.custom_id, `${source}.custom_id`);
+    if (customID !== null) {
+        data.customID = customID;
+    }
+    const componentType = readNumber(record.component_type, `${source}.component_type`);
+    if (componentType !== null) {
+        data.componentType = componentType;
+    }
+
+    return data;
 }
 
 function parseInteractionOption(value: unknown, source: string): DiscordInteractionOption {
@@ -435,6 +482,14 @@ function requireArray(value: unknown, source: string): unknown[] {
     return value;
 }
 
+function parseStringArray(value: unknown, source: string): string[] {
+    if (value === undefined) {
+        return [];
+    }
+
+    return requireArray(value, source).map((entry, index) => requireString(entry, `${source}[${String(index)}]`));
+}
+
 function requireString(value: unknown, source: string): string {
     if (typeof value !== "string" || value.length === 0) {
         throw new Error(`${source} must be a non-empty string`);
@@ -460,6 +515,14 @@ function readNullableString(value: unknown, source: string): string | null {
     }
 
     return requireString(value, source);
+}
+
+function readNumber(value: unknown, source: string): number | null {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    return requireNumber(value, source);
 }
 
 function requireNumber(value: unknown, source: string): number {

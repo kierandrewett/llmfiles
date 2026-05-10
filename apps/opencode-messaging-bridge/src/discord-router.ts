@@ -9,21 +9,27 @@ import {
 import type { BridgeConfig } from "./config.js";
 import {
     DISCORD_CHAT_INPUT_COMMAND,
+    DISCORD_COMPONENT_ACTION_ROW,
+    DISCORD_COMPONENT_STRING_SELECT,
     DISCORD_INTERACTION_APPLICATION_COMMAND,
+    DISCORD_INTERACTION_MESSAGE_COMPONENT,
     DISCORD_INTERACTION_PING,
     DISCORD_OPTION_STRING,
     DISCORD_OPTION_SUBCOMMAND,
     type DiscordAttachment,
     type DiscordInteraction,
+    type DiscordMessageComponent,
     type DiscordInteractionOption,
     type DiscordMessage,
     type PongDiscordInteractionInput,
     type SendDiscordInteractionMessageInput,
     type SendDiscordMessageInput,
 } from "./discord.js";
+import type { IntentResolverOutput, IntentResolverReadyOutput } from "./intent-resolver.js";
 import type { OpenCodeHealth, OpenCodePermissionResponse, OpenCodeSession } from "./opencode.js";
 import {
     type BridgeBindingState,
+    type BridgeIntentResolverState,
     type BridgeScheduledJobState,
     type BridgeState,
     type BridgeSurfaceAddress,
@@ -38,6 +44,10 @@ import {
     type OpenRouterAudioFormat,
     type TranscriptionResult,
 } from "./voice.js";
+
+const DISCORD_INTENT_COMPONENT_PREFIX = "ir";
+const DISCORD_SELECT_PLACEHOLDER = "Choose an answer";
+const DISCORD_SELECT_LABEL_LIMIT = 100;
 
 export interface DiscordRouterOpenCodeClient {
     health(): Promise<OpenCodeHealth>;
@@ -60,10 +70,21 @@ export interface DiscordVoiceTranscriber {
     transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
 }
 
+export interface DiscordIntentResolverRunResult {
+    resolverSessionID: string;
+    output: IntentResolverOutput;
+}
+
+export interface DiscordIntentResolver {
+    start(input: { text: string; workspaceRoot: string }): Promise<DiscordIntentResolverRunResult>;
+    continue(input: { resolverSessionID: string; answer: string; workspaceRoot: string }): Promise<DiscordIntentResolverRunResult>;
+}
+
 export interface DiscordBridgeRouterDependencies {
     config: BridgeConfig;
     opencode: DiscordRouterOpenCodeClient;
     discord: DiscordRouterDiscordClient;
+    intentResolver?: DiscordIntentResolver;
     transcriber?: DiscordVoiceTranscriber;
     fetch?: typeof fetch;
     now?: () => Date;
@@ -79,6 +100,7 @@ export class DiscordBridgeRouter {
     private readonly config: BridgeConfig;
     private readonly opencode: DiscordRouterOpenCodeClient;
     private readonly discord: DiscordRouterDiscordClient;
+    private readonly intentResolver: DiscordIntentResolver | null;
     private readonly transcriber: DiscordVoiceTranscriber | null;
     private readonly fetcher: typeof fetch;
     private readonly now: () => Date;
@@ -87,6 +109,7 @@ export class DiscordBridgeRouter {
         this.config = dependencies.config;
         this.opencode = dependencies.opencode;
         this.discord = dependencies.discord;
+        this.intentResolver = dependencies.intentResolver ?? null;
         this.transcriber = dependencies.transcriber ?? null;
         this.fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
         this.now = dependencies.now ?? (() => new Date());
@@ -106,6 +129,16 @@ export class DiscordBridgeRouter {
             return;
         }
 
+        if (message.content.trim().length > 0) {
+            if (await this.handlePendingResolverText(message.channelID, message.userID, message.content.trim())) {
+                return;
+            }
+            if (this.config.intentResolver.enabled) {
+                await this.handleIntentResolverStart(message.channelID, message.userID, message.content.trim());
+                return;
+            }
+        }
+
         const attachment = firstAudioAttachment(message.attachments ?? []);
         if (attachment) {
             await this.handleAudioPrompt(message.channelID, attachment);
@@ -118,6 +151,10 @@ export class DiscordBridgeRouter {
                 interactionID: interaction.id,
                 interactionToken: interaction.token,
             });
+            return;
+        }
+        if (interaction.type === DISCORD_INTERACTION_MESSAGE_COMPONENT) {
+            await this.handleComponentInteraction(interaction);
             return;
         }
         if (interaction.type !== DISCORD_INTERACTION_APPLICATION_COMMAND) {
