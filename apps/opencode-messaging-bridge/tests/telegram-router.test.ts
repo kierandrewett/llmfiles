@@ -218,7 +218,7 @@ describe("TelegramBridgeRouter", () => {
             {
                 chatID: "456",
                 threadID: null,
-                text: "*\\[bridge\\]* Which repository\\?",
+                text: "*\\[bridge\\]* Which repository?",
                 parseMode: TELEGRAM_MARKDOWN_PARSE_MODE,
                 replyMarkup: {
                     inlineKeyboard: [
