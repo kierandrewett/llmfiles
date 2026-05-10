@@ -15,6 +15,7 @@ This package implements the standalone bridge described in `../../docs/opencode-
 - OpenCode server-sent event relay for bound Telegram and Discord sessions, including Telegram draft/edit previews for
   assistant text parts, permission prompts, tool status updates, and session errors
 - opt-in OpenRouter voice transcription for Telegram voice/audio messages and Discord audio attachments
+- opt-in workspace intent resolution for short plain-text Telegram and Discord requests
 - optional OpenCode process supervision for `opencode serve`
 - CLI commands for checking the configured OpenCode server and running Telegram or Discord daemon loops
 
@@ -30,6 +31,7 @@ back to the OpenCode server.
 - [Discord setup](#discord-setup)
 - [Local setup](#local-setup)
 - [Voice transcription](#voice-transcription)
+- [Workspace intent resolver](#workspace-intent-resolver)
 - [Commands](#commands)
 - [Docker](#docker)
 
@@ -349,6 +351,38 @@ export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678" # needed for 
 export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"       # optional, but useful while testing
 export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
 ```
+
+## Workspace intent resolver
+
+The workspace intent resolver is disabled by default. When enabled, short plain-text messages from allowlisted users are
+sent to a hidden OpenCode resolver session first. The resolver returns one of three outcomes:
+
+- a resolved workspace path and prompt, which creates a real OpenCode session under `OPENCODE_BRIDGE_WORKSPACE_ROOT`
+- a clarification question, shown as Telegram inline buttons or a Discord select menu
+- a cannot-resolve reason, sent back to the chat or channel
+
+Enable it only when the bridge can see the repository root it is allowed to choose from:
+
+```bash
+export OPENCODE_BRIDGE_WORKSPACE_ROOT="/workspace"
+export OPENCODE_BRIDGE_INTENT_RESOLVER="1"
+export OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS="4"
+export OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS="600000"
+```
+
+Rules:
+
+- `OPENCODE_BRIDGE_WORKSPACE_ROOT` must be an absolute path.
+- Resolved paths must stay under that root.
+- Clarification state is stored in `state.json`, but tokens, OpenRouter keys, and OpenCode credentials are not.
+- Telegram plain text can start or continue a resolver flow without extra platform permissions.
+- Discord plain text needs Message Content intent enabled in Discord and `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1`.
+- Discord component selections and slash commands do not need Message Content intent.
+- Long commands such as `/oc prompt ...` and `!oc prompt ...` remain available as explicit escape hatches.
+
+For Docker Compose, keep `OPENCODE_BRIDGE_WORKSPACE_ROOT=/workspace` and mount each repo the resolver may use under
+`/workspace`. If you only mount one repo at `/workspace/project`, the resolver can only safely create sessions in that repo
+or its children.
 
 ## Voice transcription
 

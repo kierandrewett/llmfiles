@@ -29,6 +29,17 @@ services:
       OPENCODE_BRIDGE_IMPLICIT_REPLY: "0"
       XDG_STATE_HOME: "/state"
 
+      # Optional workspace intent resolver:
+      # 1. Leave disabled unless you want short plain-text intents to start a hidden
+      #    resolver session before creating the real OpenCode workspace session.
+      # 2. WORKSPACE_ROOT must contain the mounted repositories the resolver may choose.
+      # 3. Discord short intents need Message Content intent enabled; Discord slash
+      #    commands and component clicks do not.
+      OPENCODE_BRIDGE_WORKSPACE_ROOT: "/workspace"
+      OPENCODE_BRIDGE_INTENT_RESOLVER: "0"
+      OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS: "4"
+      OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS: "600000"
+
       # Discord setup:
       # 1. Go to https://discord.com/developers/applications and create an app.
       # 2. Add a bot, copy its token, and put it below.
@@ -78,6 +89,7 @@ services:
       - "/home/kieran/.config/opencode-messaging-bridge/opencode-config:/home/node/.config/opencode:ro"
 
       # Host project to control. Inside the container it is always /workspace/project.
+      # Mount more repos under /workspace if you enable the intent resolver.
       - "/home/kieran/dev/bsociety:/workspace/project"
 
       # Bridge state only: Telegram offsets, Discord resume data, slash signatures, and bindings.
