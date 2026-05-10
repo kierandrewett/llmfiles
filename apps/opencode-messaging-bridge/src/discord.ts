@@ -17,6 +17,16 @@ export interface DiscordMessage {
     userID: string | null;
     authorBot: boolean;
     content: string;
+    attachments?: DiscordAttachment[];
+}
+
+export interface DiscordAttachment {
+    id: string;
+    filename: string;
+    contentType: string | null;
+    size: number;
+    url: string;
+    durationSeconds: number | null;
 }
 
 export interface DiscordInteractionOption {
@@ -290,7 +300,7 @@ export function parseDiscordMessage(value: unknown, source = "Discord message"):
     const record = requireRecord(value, source);
     const author = readRecord(record.author, `${source}.author`);
 
-    return {
+    const message: DiscordMessage = {
         id: requireString(record.id, `${source}.id`),
         channelID: requireString(record.channel_id, `${source}.channel_id`),
         guildID: readNullableString(record.guild_id, `${source}.guild_id`),
@@ -298,6 +308,12 @@ export function parseDiscordMessage(value: unknown, source = "Discord message"):
         authorBot: author?.bot === true,
         content: readString(record.content, `${source}.content`) ?? "",
     };
+    const attachments = parseDiscordAttachments(record.attachments, source);
+    if (attachments.length > 0) {
+        message.attachments = attachments;
+    }
+
+    return message;
 }
 
 export function parseDiscordInteraction(value: unknown, source = "Discord interaction"): DiscordInteraction {
@@ -368,6 +384,27 @@ function parseInteractionOption(value: unknown, source: string): DiscordInteract
     }
 
     return option;
+}
+
+function parseDiscordAttachments(value: unknown, source: string): DiscordAttachment[] {
+    if (value === undefined) {
+        return [];
+    }
+
+    return requireArray(value, `${source}.attachments`).map((entry, index) => parseDiscordAttachment(entry, `${source}.attachments[${String(index)}]`));
+}
+
+function parseDiscordAttachment(value: unknown, source: string): DiscordAttachment {
+    const record = requireRecord(value, source);
+
+    return {
+        id: requireString(record.id, `${source}.id`),
+        filename: requireString(record.filename, `${source}.filename`),
+        contentType: readString(record.content_type, `${source}.content_type`),
+        size: requireNumber(record.size, `${source}.size`),
+        url: requireString(record.url, `${source}.url`),
+        durationSeconds: record.duration_secs === undefined ? null : requireNumber(record.duration_secs, `${source}.duration_secs`),
+    };
 }
 
 function requireRecord(value: unknown, source: string): Record<string, unknown> {

@@ -13,6 +13,7 @@ import {
     DISCORD_INTERACTION_PING,
     DISCORD_OPTION_STRING,
     DISCORD_OPTION_SUBCOMMAND,
+    type DiscordAttachment,
     type DiscordInteraction,
     type DiscordInteractionOption,
     type DiscordMessage,
@@ -30,6 +31,13 @@ import {
     loadOrCreateBridgeState,
     writeBridgeState,
 } from "./state.js";
+import {
+    audioFormatFromMetadata,
+    downloadRemoteAudio,
+    enforceAudioSizeLimit,
+    type OpenRouterAudioFormat,
+    type TranscriptionResult,
+} from "./voice.js";
 
 export interface DiscordRouterOpenCodeClient {
     health(): Promise<OpenCodeHealth>;
@@ -48,10 +56,16 @@ export interface DiscordRouterDiscordClient {
     pongInteraction(input: PongDiscordInteractionInput): Promise<void>;
 }
 
+export interface DiscordVoiceTranscriber {
+    transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
+}
+
 export interface DiscordBridgeRouterDependencies {
     config: BridgeConfig;
     opencode: DiscordRouterOpenCodeClient;
     discord: DiscordRouterDiscordClient;
+    transcriber?: DiscordVoiceTranscriber;
+    fetch?: typeof fetch;
     now?: () => Date;
 }
 
@@ -65,12 +79,16 @@ export class DiscordBridgeRouter {
     private readonly config: BridgeConfig;
     private readonly opencode: DiscordRouterOpenCodeClient;
     private readonly discord: DiscordRouterDiscordClient;
+    private readonly transcriber: DiscordVoiceTranscriber | null;
+    private readonly fetcher: typeof fetch;
     private readonly now: () => Date;
 
     constructor(dependencies: DiscordBridgeRouterDependencies) {
         this.config = dependencies.config;
         this.opencode = dependencies.opencode;
         this.discord = dependencies.discord;
+        this.transcriber = dependencies.transcriber ?? null;
+        this.fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
         this.now = dependencies.now ?? (() => new Date());
     }
 
@@ -83,11 +101,15 @@ export class DiscordBridgeRouter {
         }
 
         const command = parseDiscordMessageCommand(message.content, this.config.discord.prefix, this.config.implicitReply);
-        if (!command) {
+        if (command) {
+            await this.handleCommand(message.channelID, command);
             return;
         }
 
-        await this.handleCommand(message.channelID, command);
+        const attachment = firstAudioAttachment(message.attachments ?? []);
+        if (attachment) {
+            await this.handleAudioPrompt(message.channelID, attachment);
+        }
     }
 
     async handleInteraction(interaction: DiscordInteraction): Promise<void> {
@@ -234,6 +256,46 @@ export class DiscordBridgeRouter {
         await this.discord.sendTyping({ channelID });
         await this.opencode.sendPrompt({ sessionID: surface.activeSessionID, text });
         await this.send(channelID, `[bridge] prompt sent to ${surface.activeSessionID}`);
+    }
+
+    private async handleAudioPrompt(channelID: string, attachment: DiscordAttachment): Promise<void> {
+        const state = await this.loadState();
+        const surface = findSurface(state, surfaceID(channelID));
+        if (!surface?.activeSessionID) {
+            await this.send(channelID, `[bridge] no active session. Use ${this.config.discord.prefix} attach latest or ${this.config.discord.prefix} new first.`);
+            return;
+        }
+        if (!this.config.voice.enabled || this.transcriber === null) {
+            await this.send(channelID, "[bridge] voice transcription is disabled");
+            return;
+        }
+
+        const format = audioFormatFromMetadata({ mimeType: attachment.contentType, fileName: attachment.filename });
+        if (format === null) {
+            await this.send(channelID, "[bridge] unsupported audio format. Use wav, mp3, flac, m4a, ogg, webm, or aac.");
+            return;
+        }
+
+        await this.discord.sendTyping({ channelID });
+        try {
+            enforceAudioSizeLimit(attachment.size, this.config.voice.maxAudioBytes);
+            const audio = await downloadRemoteAudio({
+                url: attachment.url,
+                maxBytes: this.config.voice.maxAudioBytes,
+                fetch: this.fetcher,
+            });
+            const transcription = await this.transcriber.transcribe({ data: audio, format });
+            const text = transcription.text.trim();
+            if (text.length === 0) {
+                await this.send(channelID, "[bridge] audio transcription was empty");
+                return;
+            }
+
+            await this.opencode.sendPrompt({ sessionID: surface.activeSessionID, text });
+            await this.send(channelID, `[bridge] transcribed audio sent to ${surface.activeSessionID}`);
+        } catch (error) {
+            await this.send(channelID, `[bridge] audio transcription failed: ${audioErrorMessage(error)}`);
+        }
     }
 
     private async handleAbort(channelID: string): Promise<void> {
@@ -563,6 +625,17 @@ function upsertBinding(state: BridgeState, binding: BridgeBindingState): void {
 
 function jobsForSurface(state: BridgeState, id: string): BridgeScheduledJobState[] {
     return state.jobs.filter((job) => job.surfaceID === id);
+}
+
+function firstAudioAttachment(attachments: DiscordAttachment[]): DiscordAttachment | null {
+    return attachments.find((attachment) => {
+        const contentType = attachment.contentType?.split(";")[0]?.trim().toLowerCase() ?? "";
+        return contentType.startsWith("audio/") || audioFormatFromMetadata({ mimeType: attachment.contentType, fileName: attachment.filename }) !== null;
+    }) ?? null;
+}
+
+function audioErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 function formatDiscordJobLine(job: BridgeScheduledJobState): string {
