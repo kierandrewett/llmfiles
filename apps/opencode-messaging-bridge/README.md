@@ -218,7 +218,7 @@ Gateway and outgoing-webhook interaction delivery modes are mutually exclusive.
 
 Enable the Message Content privileged intent only if you want `!oc ...` prefix commands or plain-text replies in guild
 channels. Slash commands do not need that privileged intent. If you enable it in the Developer Portal, also set
-`OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in the bridge env.
+`OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in your local environment or `compose.local.yaml`.
 
 Set the required Discord environment before starting the bridge:
 
@@ -413,7 +413,7 @@ output can be sent back to Discord.
 
 `telegram+discord-once` runs one Telegram poll and one Discord Gateway cycle. `telegram+discord` runs both surfaces in one
 bridge process with one managed `opencode serve` process and one OpenCode event relay for both Telegram and Discord
-bindings. Keep both token blocks in the runtime env file when you use the combined command.
+bindings. Keep both token blocks in your local environment or `compose.local.yaml` when you use the combined command.
 
 `automation-once` runs due scheduled prompts once and exits. The continuous `telegram`, `discord`, and `telegram+discord`
 commands run the same scheduler loop every 30 seconds. Each scheduled prompt targets the OpenCode session that was active
@@ -578,7 +578,8 @@ docker logs -f opencode-bridge
 
 The bridge state lives in the `opencode-bridge-state` Docker volume because the image sets `XDG_STATE_HOME=/state`.
 That state stores Telegram offsets, Discord Gateway resume metadata, slash-command registration signatures,
-chat/channel-to-session bindings, and scheduled prompt jobs. It must not contain bot tokens or OpenCode credentials.
+chat/channel-to-session bindings, and scheduled prompt jobs. It must not contain bot tokens, OpenCode credentials, or
+OpenRouter keys.
 
 OpenCode provider credentials are separate. OpenCode stores credentials created through `/connect` in
 `~/.local/share/opencode/auth.json`, so ChatGPT Plus/Pro and OpenCode Go credentials should be prepared on the host and
