@@ -70,6 +70,62 @@ describe("OpenCodeHttpClient", () => {
         assert.equal(requests[0]?.init.body, JSON.stringify({ parts: [{ type: "text", text: "hello" }] }));
     });
 
+    it("sends prompts synchronously and parses structured output", async () => {
+        const { client, requests } = createClient([
+            {
+                info: {
+                    id: "msg_abc",
+                    sessionID: "ses_abc",
+                    structured_output: { status: "cannot_resolve", reason: "No match" },
+                },
+                parts: [
+                    { type: "text", text: "{\"status\":\"cannot_resolve\",\"reason\":\"No match\"}" },
+                ],
+            },
+        ]);
+
+        const message = await client.sendPromptAndWait({
+            sessionID: "ses_abc",
+            directory: "/workspace/dev",
+            text: "resolve this",
+            format: {
+                type: "json_schema",
+                retryCount: 1,
+                schema: {
+                    type: "object",
+                    properties: { status: { type: "string" } },
+                    required: ["status"],
+                },
+            },
+        });
+
+        assert.equal(requests[0]?.url, "http://127.0.0.1:4096/session/ses_abc/message?directory=%2Fworkspace%2Fdev");
+        assert.equal(requests[0]?.init.method, "POST");
+        assert.equal(requests[0]?.init.body, JSON.stringify({
+            parts: [{ type: "text", text: "resolve this" }],
+            format: {
+                type: "json_schema",
+                retryCount: 1,
+                schema: {
+                    type: "object",
+                    properties: { status: { type: "string" } },
+                    required: ["status"],
+                },
+            },
+        }));
+        assert.deepEqual(message, {
+            info: {
+                id: "msg_abc",
+                sessionID: "ses_abc",
+                structuredOutput: { status: "cannot_resolve", reason: "No match" },
+                error: null,
+            },
+            parts: [
+                { type: "text", text: "{\"status\":\"cannot_resolve\",\"reason\":\"No match\"}" },
+            ],
+        });
+    });
+
     it("aborts sessions", async () => {
         const { client, requests } = createClient([true]);
 
