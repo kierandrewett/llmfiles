@@ -36,6 +36,39 @@ export interface SendPromptInput {
     directory?: string;
 }
 
+export interface OpenCodeJsonSchemaFormat {
+    type: "json_schema";
+    schema: Record<string, unknown>;
+    retryCount?: number;
+}
+
+export interface OpenCodeTextFormat {
+    type: "text";
+}
+
+export type OpenCodeOutputFormat = OpenCodeJsonSchemaFormat | OpenCodeTextFormat;
+
+export interface SendPromptAndWaitInput extends SendPromptInput {
+    format?: OpenCodeOutputFormat;
+}
+
+export interface OpenCodeMessageInfo {
+    id: string | null;
+    sessionID: string | null;
+    structuredOutput: unknown;
+    error: unknown;
+}
+
+export interface OpenCodeMessagePart {
+    type: string;
+    text: string | null;
+}
+
+export interface OpenCodeMessageResponse {
+    info: OpenCodeMessageInfo;
+    parts: OpenCodeMessagePart[];
+}
+
 export interface AbortSessionInput {
     sessionID: string;
     directory?: string;
@@ -145,6 +178,25 @@ export class OpenCodeHttpClient {
                 parts: [{ type: "text", text: input.text }],
             },
         });
+    }
+
+    async sendPromptAndWait(input: SendPromptAndWaitInput): Promise<OpenCodeMessageResponse> {
+        const body: Record<string, unknown> = {
+            parts: [{ type: "text", text: input.text }],
+        };
+        if (input.format) {
+            body.format = input.format;
+        }
+
+        const value = await this.requestJson(`/session/${encodeURIComponent(input.sessionID)}/message`, {
+            method: "POST",
+            query: {
+                directory: input.directory,
+            },
+            body,
+        });
+
+        return parseMessageResponse(value, "OpenCode message response");
     }
 
     async abortSession(input: AbortSessionInput): Promise<void> {
@@ -288,12 +340,44 @@ function parseSessionTime(value: unknown, source: string): OpenCodeSessionTime |
     return time;
 }
 
+function parseMessageResponse(value: unknown, source: string): OpenCodeMessageResponse {
+    const record = requireRecord(value, source);
+    const info = requireRecord(record.info, `${source}.info`);
+
+    return {
+        info: {
+            id: readNullableString(info.id, `${source}.info.id`),
+            sessionID: readNullableString(info.sessionID ?? info.sessionId, `${source}.info.sessionID`),
+            structuredOutput: info.structured_output ?? info.structuredOutput ?? null,
+            error: info.error ?? null,
+        },
+        parts: requireArray(record.parts, `${source}.parts`).map((entry, index) => parseMessagePart(entry, `${source}.parts[${String(index)}]`)),
+    };
+}
+
+function parseMessagePart(value: unknown, source: string): OpenCodeMessagePart {
+    const record = requireRecord(value, source);
+
+    return {
+        type: requireString(record.type, `${source}.type`),
+        text: readText(record.text, `${source}.text`),
+    };
+}
+
 function requireRecord(value: unknown, source: string): Record<string, unknown> {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
         throw new Error(`${source} must be an object`);
     }
 
     return value as Record<string, unknown>;
+}
+
+function requireArray(value: unknown, source: string): unknown[] {
+    if (!Array.isArray(value)) {
+        throw new Error(`${source} must be an array`);
+    }
+
+    return value;
 }
 
 function requireString(value: unknown, source: string): string {
@@ -310,6 +394,17 @@ function readNullableString(value: unknown, source: string): string | null {
     }
 
     return requireString(value, source);
+}
+
+function readText(value: unknown, source: string): string | null {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    if (typeof value !== "string") {
+        throw new Error(`${source} must be a string`);
+    }
+
+    return value;
 }
 
 function requireBoolean(value: unknown, source: string): boolean {

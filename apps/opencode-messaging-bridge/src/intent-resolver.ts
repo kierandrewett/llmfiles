@@ -44,7 +44,11 @@ const OPTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_CLARIFICATION_OPTIONS = 10;
 
 export function parseIntentResolverOutput(raw: string): IntentResolverOutput {
-    const record = parseStrictJsonObject(raw);
+    return parseIntentResolverValue(parseStrictJsonObject(raw));
+}
+
+export function parseIntentResolverValue(value: unknown): IntentResolverOutput {
+    const record = requireRecord(value, "Intent resolver output");
     const status = requireString(record.status, "Intent resolver output.status");
 
     if (status === "ready") {
