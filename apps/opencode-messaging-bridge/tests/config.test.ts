@@ -40,6 +40,16 @@ describe("loadBridgeConfig", () => {
         assert.equal(config.implicitReply, false);
         assert.equal(config.telegram.enabled, false);
         assert.equal(config.discord.enabled, false);
+        assert.deepEqual(config.voice, {
+            enabled: false,
+            maxAudioBytes: 20971520,
+            openrouter: {
+                apiKey: null,
+                baseUrl: "https://openrouter.ai/api/v1",
+                model: "openai/whisper-1",
+                language: null,
+            },
+        });
     });
 
     it("loads managed OpenCode process settings and derives the default base URL", () => {
@@ -128,6 +138,36 @@ describe("loadBridgeConfig", () => {
         assert.equal(config.discord.maxMessageChars, 1850);
     });
 
+    it("loads opt-in OpenRouter voice transcription settings", () => {
+        const config = loadBridgeConfig({
+            HOME: "/home/example",
+            OPENCODE_BRIDGE_VOICE_TRANSCRIPTION: "1",
+            OPENCODE_BRIDGE_OPENROUTER_API_KEY: "openrouter-key",
+            OPENCODE_BRIDGE_OPENROUTER_BASE_URL: "https://openrouter.test/api/v1/",
+            OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_MODEL: "openai/whisper-large-v3",
+            OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_LANGUAGE: "en",
+            OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES: "1048576",
+        });
+
+        assert.deepEqual(config.voice, {
+            enabled: true,
+            maxAudioBytes: 1048576,
+            openrouter: {
+                apiKey: "openrouter-key",
+                baseUrl: "https://openrouter.test/api/v1",
+                model: "openai/whisper-large-v3",
+                language: "en",
+            },
+        });
+    });
+
+    it("requires an OpenRouter key when voice transcription is enabled", () => {
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_VOICE_TRANSCRIPTION: "1" }),
+            /OPENCODE_BRIDGE_OPENROUTER_API_KEY must be set when OPENCODE_BRIDGE_VOICE_TRANSCRIPTION is enabled/,
+        );
+    });
+
     it("rejects invalid Discord daemon settings", () => {
         assert.throws(
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_DISCORD_SLASH_COMMAND: "bad command" }),
@@ -144,6 +184,10 @@ describe("loadBridgeConfig", () => {
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENCODE_BASE_URL: "not a url" }),
             /OPENCODE_BRIDGE_OPENCODE_BASE_URL must be a valid URL/,
         );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENROUTER_BASE_URL: "ftp://openrouter.test" }),
+            /OPENCODE_BRIDGE_OPENROUTER_BASE_URL must be a valid URL: unsupported protocol/,
+        );
     });
 
     it("rejects invalid managed OpenCode numeric settings", () => {
@@ -154,6 +198,10 @@ describe("loadBridgeConfig", () => {
         assert.throws(
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS: "0" }),
             /OPENCODE_BRIDGE_OPENCODE_STARTUP_TIMEOUT_MS must be an integer greater than 0/,
+        );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES: "0" }),
+            /OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES must be an integer between 1 and 20971520/,
         );
     });
 
