@@ -5,10 +5,11 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { type BridgeConfig } from "../src/config.js";
-import type { DiscordInteraction, DiscordMessage, PongDiscordInteractionInput, SendDiscordInteractionMessageInput, SendDiscordMessageInput } from "../src/discord.js";
+import type { DiscordAttachment, DiscordInteraction, DiscordMessage, PongDiscordInteractionInput, SendDiscordInteractionMessageInput, SendDiscordMessageInput } from "../src/discord.js";
 import { DiscordBridgeRouter, parseDiscordMessageCommand, parseDiscordSlashCommand } from "../src/discord-router.js";
 import { type OpenCodeHealth, type OpenCodePermissionResponse, type OpenCodeSession } from "../src/opencode.js";
 import { createDefaultBridgeState, readBridgeState, writeBridgeState } from "../src/state.js";
+import type { OpenRouterAudioFormat, TranscriptionResult } from "../src/voice.js";
 
 const tempDirs: string[] = [];
 
@@ -108,6 +109,34 @@ describe("DiscordBridgeRouter", () => {
         assert.deepEqual(fixture.discord.typing, ["control-channel"]);
         assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "hello there" }]);
         assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] prompt sent to ses_abc"]);
+    });
+
+    it("transcribes Discord audio attachments and sends them to the active session", async () => {
+        const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from Discord audio" });
+        const state = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z"));
+        state.surfaces.push({ id: "discord:control-channel", platform: "discord", surface: { channelID: "control-channel", threadID: null }, activeSessionID: "ses_abc", updatedAt: state.updatedAt });
+        await writeBridgeState(fixture.statePath, state);
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "", [audioAttachment()]));
+
+        assert.deepEqual(fixture.downloads, ["https://cdn.discordapp.com/voice.ogg"]);
+        assert.deepEqual(fixture.transcriber.transcriptions, [{ data: [1, 2, 3], format: "ogg" }]);
+        assert.deepEqual(fixture.opencode.prompts, [{ sessionID: "ses_abc", text: "hello from Discord audio" }]);
+        assert.deepEqual(fixture.discord.typing, ["control-channel"]);
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] transcribed audio sent to ses_abc"]);
+    });
+
+    it("does not transcribe Discord audio before a session is attached", async () => {
+        const fixture = await createFixture({ voiceEnabled: true, transcriptionText: "hello from Discord audio" });
+        const router = new DiscordBridgeRouter(fixture.dependencies);
+
+        await router.handleMessage(message("user-id", "control-channel", "", [audioAttachment()]));
+
+        assert.deepEqual(fixture.downloads, []);
+        assert.deepEqual(fixture.transcriber.transcriptions, []);
+        assert.deepEqual(fixture.opencode.prompts, []);
+        assert.deepEqual(fixture.discord.messages.map((entry) => entry.content), ["[bridge] no active session. Use !oc attach latest or !oc new first."]);
     });
 
     it("schedules prompts against the active Discord session", async () => {
@@ -231,6 +260,8 @@ describe("DiscordBridgeRouter", () => {
 interface FixtureOptions {
     sessions?: OpenCodeSession[];
     createdSession?: OpenCodeSession;
+    voiceEnabled?: boolean;
+    transcriptionText?: string;
 }
 
 interface FakeOpenCode {
@@ -256,7 +287,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         pongs: PongDiscordInteractionInput[];
         typing: string[];
     };
+    downloads: string[];
     opencode: FakeOpenCode;
+    transcriber: FakeTranscriber;
 }> {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-discord-router-test-"));
     tempDirs.push(dir);
@@ -277,6 +310,23 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
         },
         async pongInteraction(input: PongDiscordInteractionInput): Promise<void> {
             discord.pongs.push(input);
+        },
+    };
+    const downloads: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+        downloads.push(String(input));
+
+        return new Response(new Uint8Array([1, 2, 3]), {
+            status: 200,
+            headers: { "content-length": "3" },
+        });
+    };
+    const transcriber: FakeTranscriber = {
+        transcriptions: [],
+        async transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult> {
+            transcriber.transcriptions.push({ data: Array.from(input.data), format: input.format });
+
+            return { text: options.transcriptionText ?? "transcribed text" };
         },
     };
     const opencode: FakeOpenCode = {
@@ -315,14 +365,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<{
             config: bridgeConfig(statePath),
             discord,
             opencode,
+            transcriber,
+            fetch: fetcher,
             now: () => new Date("2026-05-09T00:00:00.000Z"),
         },
         discord,
+        downloads,
         opencode,
+        transcriber,
     };
 }
 
-function bridgeConfig(statePath: string): BridgeConfig {
+function bridgeConfig(statePath: string, options: FixtureOptions = {}): BridgeConfig {
     return {
         opencode: {
             baseUrl: "http://127.0.0.1:4096",
@@ -359,10 +413,10 @@ function bridgeConfig(statePath: string): BridgeConfig {
             maxMessageChars: 1850,
         },
         voice: {
-            enabled: false,
+            enabled: options.voiceEnabled ?? false,
             maxAudioBytes: 20971520,
             openrouter: {
-                apiKey: null,
+                apiKey: options.voiceEnabled ? "openrouter-key" : null,
                 baseUrl: "https://openrouter.ai/api/v1",
                 model: "openai/whisper-1",
                 language: null,
@@ -371,8 +425,8 @@ function bridgeConfig(statePath: string): BridgeConfig {
     };
 }
 
-function message(userID: string, channelID: string, content: string): DiscordMessage {
-    return {
+function message(userID: string, channelID: string, content: string, attachments: DiscordAttachment[] = []): DiscordMessage {
+    const result: DiscordMessage = {
         id: "message-id",
         channelID,
         guildID: "guild-id",
@@ -380,6 +434,27 @@ function message(userID: string, channelID: string, content: string): DiscordMes
         authorBot: false,
         content,
     };
+    if (attachments.length > 0) {
+        result.attachments = attachments;
+    }
+
+    return result;
+}
+
+function audioAttachment(): DiscordAttachment {
+    return {
+        id: "attachment-id",
+        filename: "voice.ogg",
+        contentType: "audio/ogg",
+        size: 3,
+        url: "https://cdn.discordapp.com/voice.ogg",
+        durationSeconds: 3.4,
+    };
+}
+
+interface FakeTranscriber {
+    transcriptions: Array<{ data: number[]; format: OpenRouterAudioFormat }>;
+    transcribe(input: { data: Uint8Array; format: OpenRouterAudioFormat }): Promise<TranscriptionResult>;
 }
 
 function interaction(

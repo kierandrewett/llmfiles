@@ -90,6 +90,38 @@ describe("Discord payload parsing", () => {
         });
     });
 
+    it("parses message audio attachments for voice transcription", () => {
+        const message = parseDiscordMessage({
+            id: "message-id",
+            channel_id: "channel-id",
+            guild_id: "guild-id",
+            content: "",
+            author: { id: "user-id", bot: false },
+            attachments: [
+                {
+                    id: "attachment-id",
+                    filename: "voice.ogg",
+                    content_type: "audio/ogg",
+                    size: 1234,
+                    url: "https://cdn.discordapp.com/voice.ogg",
+                    proxy_url: "https://media.discordapp.net/voice.ogg",
+                    duration_secs: 3.4,
+                },
+            ],
+        });
+
+        assert.deepEqual(message.attachments, [
+            {
+                id: "attachment-id",
+                filename: "voice.ogg",
+                contentType: "audio/ogg",
+                size: 1234,
+                url: "https://cdn.discordapp.com/voice.ogg",
+                durationSeconds: 3.4,
+            },
+        ]);
+    });
+
     it("parses slash command interactions into daemon interactions", () => {
         const interaction = parseDiscordInteraction({
             id: "interaction-id",
