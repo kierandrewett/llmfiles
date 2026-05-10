@@ -22,6 +22,7 @@ export const TELEGRAM_BRIDGE_BOT_COMMANDS: TelegramBotCommand[] = [
 export interface TelegramUpdate {
     updateID: number;
     message: TelegramMessage | null;
+    callbackQuery?: TelegramCallbackQuery;
 }
 
 export interface TelegramMessage {
@@ -42,6 +43,13 @@ export interface TelegramAudioAttachment {
     mimeType: string | null;
 }
 
+export interface TelegramCallbackQuery {
+    id: string;
+    userID: string;
+    message: TelegramMessage | null;
+    data: string | null;
+}
+
 export interface GetUpdatesOptions {
     offset?: number;
     timeoutSeconds?: number;
@@ -53,6 +61,16 @@ export interface SendMessageInput {
     threadID: string | null;
     text: string;
     parseMode?: typeof TELEGRAM_MARKDOWN_PARSE_MODE;
+    replyMarkup?: TelegramInlineKeyboardMarkup;
+}
+
+export interface TelegramInlineKeyboardMarkup {
+    inlineKeyboard: TelegramInlineKeyboardButton[][];
+}
+
+export interface TelegramInlineKeyboardButton {
+    text: string;
+    callbackData: string;
 }
 
 export interface TelegramSentMessage {
@@ -78,6 +96,12 @@ export interface SendChatActionInput {
     chatID: string;
     threadID: string | null;
     action: "typing";
+}
+
+export interface AnswerCallbackQueryInput {
+    callbackQueryID: string;
+    text?: string;
+    showAlert?: boolean;
 }
 
 export interface TelegramBotCommand {
@@ -222,6 +246,10 @@ export class TelegramBotApiClient {
         await this.request("sendChatAction", telegramChatActionBody(input));
     }
 
+    async answerCallbackQuery(input: AnswerCallbackQueryInput): Promise<void> {
+        await this.request("answerCallbackQuery", telegramAnswerCallbackQueryBody(input));
+    }
+
     private async request(method: string, body: Record<string, unknown>): Promise<unknown> {
         const response = await this.fetcher(`${this.baseUrl}/bot${this.botToken}/${method}`, {
             method: "POST",
@@ -272,8 +300,20 @@ export function telegramMessageBody(input: SendMessageInput): Record<string, unk
     if (input.parseMode) {
         body.parse_mode = input.parseMode;
     }
+    if (input.replyMarkup) {
+        body.reply_markup = telegramInlineKeyboardMarkupBody(input.replyMarkup);
+    }
 
     return body;
+}
+
+export function telegramInlineKeyboardMarkupBody(input: TelegramInlineKeyboardMarkup): Record<string, unknown> {
+    return {
+        inline_keyboard: input.inlineKeyboard.map((row) => row.map((button) => ({
+            text: button.text,
+            callback_data: button.callbackData,
+        }))),
+    };
 }
 
 export function telegramMessageDraftBody(input: SendMessageDraftInput): Record<string, unknown> {
@@ -355,13 +395,33 @@ export function telegramChatActionBody(input: SendChatActionInput): Record<strin
     return body;
 }
 
+export function telegramAnswerCallbackQueryBody(input: AnswerCallbackQueryInput): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        callback_query_id: input.callbackQueryID,
+    };
+
+    if (input.text !== undefined) {
+        body.text = input.text;
+    }
+    if (input.showAlert !== undefined) {
+        body.show_alert = input.showAlert;
+    }
+
+    return body;
+}
+
 function parseUpdate(value: unknown, source: string): TelegramUpdate {
     const record = requireRecord(value, source);
-
-    return {
+    const update: TelegramUpdate = {
         updateID: requireNumber(record.update_id, `${source}.update_id`),
         message: record.message === undefined ? null : parseMessage(record.message, `${source}.message`),
     };
+
+    if (record.callback_query !== undefined) {
+        update.callbackQuery = parseCallbackQuery(record.callback_query, `${source}.callback_query`);
+    }
+
+    return update;
 }
 
 function parseMessage(value: unknown, source: string): TelegramMessage {
@@ -387,6 +447,18 @@ function parseMessage(value: unknown, source: string): TelegramMessage {
     }
 
     return message;
+}
+
+function parseCallbackQuery(value: unknown, source: string): TelegramCallbackQuery {
+    const record = requireRecord(value, source);
+    const from = requireRecord(record.from, `${source}.from`);
+
+    return {
+        id: requireString(record.id, `${source}.id`),
+        userID: String(requireNumber(from.id, `${source}.from.id`)),
+        message: record.message === undefined ? null : parseMessage(record.message, `${source}.message`),
+        data: readOptionalString(record.data, `${source}.data`) ?? null,
+    };
 }
 
 function parseAudioAttachment(record: Record<string, unknown>, source: string): TelegramAudioAttachment | null {

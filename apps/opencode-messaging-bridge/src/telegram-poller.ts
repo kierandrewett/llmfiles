@@ -47,7 +47,7 @@ export class TelegramBridgePoller {
         const state = await loadOrCreateBridgeState(this.statePath, this.now());
         const request: GetUpdatesOptions = {
             timeoutSeconds: this.timeoutSeconds,
-            allowedUpdates: ["message"],
+            allowedUpdates: ["message", "callback_query"],
         };
 
         if (state.platforms.telegram.updateOffset !== null) {
