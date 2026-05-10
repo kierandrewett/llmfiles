@@ -20,6 +20,7 @@ describe("createDefaultBridgeState", () => {
         assert.equal(state.updatedAt, "2026-05-09T00:00:00.000Z");
         assert.deepEqual(Object.keys(state.platforms), ["telegram", "discord"]);
         assert.deepEqual(state.jobs, []);
+        assert.deepEqual(state.intentResolvers, []);
         assert.equal(JSON.stringify(state).includes("baseUrl"), false);
         assert.equal(JSON.stringify(state).includes("token"), false);
     });
@@ -59,6 +60,25 @@ describe("BridgeStateStore", () => {
             createdAt: "2026-05-09T00:00:00.000Z",
             updatedAt: "2026-05-09T00:00:00.000Z",
         });
+        state.intentResolvers.push({
+            id: "ir_telegram_123",
+            platform: "telegram",
+            surfaceID: "telegram:123:",
+            surface: { chatID: "123", threadID: null },
+            userID: "123",
+            resolverSessionID: "ses_resolver",
+            workspaceRoot: "/workspace/dev",
+            originalText: "work on bsociety",
+            turnCount: 1,
+            maxTurns: 4,
+            expiresAt: "2026-05-09T00:10:00.000Z",
+            lastQuestion: "Which repository do you mean?",
+            options: [
+                { id: "repo-bsociety", label: "bsociety", value: "bsociety" },
+            ],
+            createdAt: "2026-05-09T00:00:00.000Z",
+            updatedAt: "2026-05-09T00:00:00.000Z",
+        });
 
         await writeBridgeState(filePath, state);
         const read = await readBridgeState(filePath);
@@ -85,6 +105,18 @@ describe("BridgeStateStore", () => {
         const read = await readBridgeState(filePath);
 
         assert.deepEqual(read.jobs, []);
+    });
+
+    it("loads pre-resolver state files without pending resolver sessions", async () => {
+        const dir = await createTempDir();
+        const filePath = path.join(dir, "state.json");
+        const legacyState = createDefaultBridgeState(new Date("2026-05-09T00:00:00.000Z")) as unknown as Record<string, unknown>;
+        delete legacyState.intentResolvers;
+        await writeFile(filePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
+
+        const read = await readBridgeState(filePath);
+
+        assert.deepEqual(read.intentResolvers, []);
     });
 });
 

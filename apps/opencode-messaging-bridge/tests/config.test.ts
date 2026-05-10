@@ -40,6 +40,14 @@ describe("loadBridgeConfig", () => {
         assert.equal(config.implicitReply, false);
         assert.equal(config.telegram.enabled, false);
         assert.equal(config.discord.enabled, false);
+        assert.deepEqual(config.workspace, {
+            root: null,
+        });
+        assert.deepEqual(config.intentResolver, {
+            enabled: false,
+            maxClarificationTurns: 4,
+            clarificationTtlMs: 600000,
+        });
         assert.deepEqual(config.voice, {
             enabled: false,
             maxAudioBytes: 20971520,
@@ -161,6 +169,32 @@ describe("loadBridgeConfig", () => {
         });
     });
 
+    it("loads opt-in workspace intent resolver settings", () => {
+        const config = loadBridgeConfig({
+            HOME: "/home/example",
+            OPENCODE_BRIDGE_WORKSPACE_ROOT: "/workspace/dev/",
+            OPENCODE_BRIDGE_INTENT_RESOLVER: "1",
+            OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS: "6",
+            OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS: "120000",
+        });
+
+        assert.deepEqual(config.workspace, {
+            root: "/workspace/dev",
+        });
+        assert.deepEqual(config.intentResolver, {
+            enabled: true,
+            maxClarificationTurns: 6,
+            clarificationTtlMs: 120000,
+        });
+    });
+
+    it("requires a workspace root when the intent resolver is enabled", () => {
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_INTENT_RESOLVER: "1" }),
+            /OPENCODE_BRIDGE_WORKSPACE_ROOT must be set when OPENCODE_BRIDGE_INTENT_RESOLVER is enabled/,
+        );
+    });
+
     it("requires an OpenRouter key when voice transcription is enabled", () => {
         assert.throws(
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_VOICE_TRANSCRIPTION: "1" }),
@@ -202,6 +236,18 @@ describe("loadBridgeConfig", () => {
         assert.throws(
             () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES: "0" }),
             /OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES must be an integer between 1 and 20971520/,
+        );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_WORKSPACE_ROOT: "relative/dev" }),
+            /OPENCODE_BRIDGE_WORKSPACE_ROOT must be an absolute path/,
+        );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS: "0" }),
+            /OPENCODE_BRIDGE_INTENT_RESOLVER_MAX_TURNS must be an integer between 1 and 10/,
+        );
+        assert.throws(
+            () => loadBridgeConfig({ HOME: "/home/example", OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS: "999" }),
+            /OPENCODE_BRIDGE_INTENT_RESOLVER_TTL_MS must be an integer between 1000 and 86400000/,
         );
     });
 
