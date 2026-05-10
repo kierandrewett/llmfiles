@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { type BridgeConfig } from "../src/config.js";
 import type { DiscordAttachment, DiscordInteraction, DiscordMessage, PongDiscordInteractionInput, SendDiscordInteractionMessageInput, SendDiscordMessageInput } from "../src/discord.js";
+import type { IntentResolverOutput } from "../src/intent-resolver.js";
 import { DiscordBridgeRouter, parseDiscordMessageCommand, parseDiscordSlashCommand } from "../src/discord-router.js";
 import { type OpenCodeHealth, type OpenCodePermissionResponse, type OpenCodeSession } from "../src/opencode.js";
 import { createDefaultBridgeState, readBridgeState, writeBridgeState } from "../src/state.js";

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+    DISCORD_COMPONENT_STRING_SELECT,
+    DISCORD_INTERACTION_MESSAGE_COMPONENT,
     DISCORD_INTERACTION_RESPONSE_CHANNEL_MESSAGE,
     DiscordBotApiClient,
     chunkDiscordText,
@@ -36,6 +38,51 @@ describe("DiscordBotApiClient", () => {
         });
     });
 
+    it("sends channel messages with legacy message components", async () => {
+        const fetcher = createFetch([{ id: "message-id" }]);
+        const client = new DiscordBotApiClient({ botToken: "bot-token", baseUrl: "https://discord.test/api/v10", fetch: fetcher.fetch });
+
+        await client.sendMessage({
+            channelID: "123",
+            content: "Which repository?",
+            components: [
+                {
+                    type: 1,
+                    components: [
+                        {
+                            type: DISCORD_COMPONENT_STRING_SELECT,
+                            custom_id: "ir:resolver-id",
+                            placeholder: "Choose an answer",
+                            min_values: 1,
+                            max_values: 1,
+                            options: [{ label: "api", value: "0" }],
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(fetcher.calls[0]?.jsonBody, {
+            content: "Which repository?",
+            allowed_mentions: { parse: [] },
+            components: [
+                {
+                    type: 1,
+                    components: [
+                        {
+                            type: 3,
+                            custom_id: "ir:resolver-id",
+                            placeholder: "Choose an answer",
+                            min_values: 1,
+                            max_values: 1,
+                            options: [{ label: "api", value: "0" }],
+                        },
+                    ],
+                },
+            ],
+        });
+    });
+
     it("responds to interactions without bot authorization", async () => {
         const fetcher = createFetch([null]);
         const client = new DiscordBotApiClient({ botToken: "bot-token", baseUrl: "https://discord.test/api/v10", fetch: fetcher.fetch });
@@ -55,6 +102,57 @@ describe("DiscordBotApiClient", () => {
                 content: "accepted",
                 flags: 64,
                 allowed_mentions: { parse: [] },
+            },
+        });
+    });
+
+    it("responds to interactions with message components", async () => {
+        const fetcher = createFetch([null]);
+        const client = new DiscordBotApiClient({ botToken: "bot-token", baseUrl: "https://discord.test/api/v10", fetch: fetcher.fetch });
+
+        await client.sendInteractionMessage({
+            interactionID: "interaction-id",
+            interactionToken: "interaction-token",
+            content: "Accepted",
+            ephemeral: true,
+            components: [
+                {
+                    type: 1,
+                    components: [
+                        {
+                            type: DISCORD_COMPONENT_STRING_SELECT,
+                            custom_id: "ir:resolver-id",
+                            placeholder: "Choose an answer",
+                            min_values: 1,
+                            max_values: 1,
+                            options: [{ label: "api", value: "0" }],
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(fetcher.calls[0]?.jsonBody, {
+            type: DISCORD_INTERACTION_RESPONSE_CHANNEL_MESSAGE,
+            data: {
+                content: "Accepted",
+                flags: 64,
+                allowed_mentions: { parse: [] },
+                components: [
+                    {
+                        type: 1,
+                        components: [
+                            {
+                                type: 3,
+                                custom_id: "ir:resolver-id",
+                                placeholder: "Choose an answer",
+                                min_values: 1,
+                                max_values: 1,
+                                options: [{ label: "api", value: "0" }],
+                            },
+                        ],
+                    },
+                ],
             },
         });
     });
@@ -146,6 +244,27 @@ describe("Discord payload parsing", () => {
         assert.equal(interaction.userID, "user-id");
         assert.equal(interaction.data?.options[0]?.name, "prompt");
         assert.equal(interaction.data?.options[0]?.options?.[0]?.value, "hello");
+    });
+
+    it("parses message component interactions into daemon interactions", () => {
+        const interaction = parseDiscordInteraction({
+            id: "interaction-id",
+            token: "interaction-token",
+            type: DISCORD_INTERACTION_MESSAGE_COMPONENT,
+            channel_id: "channel-id",
+            guild_id: "guild-id",
+            member: { user: { id: "user-id" } },
+            data: {
+                component_type: DISCORD_COMPONENT_STRING_SELECT,
+                custom_id: "ir:resolver-id",
+                values: ["0"],
+            },
+        });
+
+        assert.equal(interaction.type, DISCORD_INTERACTION_MESSAGE_COMPONENT);
+        assert.equal(interaction.data?.componentType, DISCORD_COMPONENT_STRING_SELECT);
+        assert.equal(interaction.data?.customID, "ir:resolver-id");
+        assert.deepEqual(interaction.data?.values, ["0"]);
     });
 });
 
