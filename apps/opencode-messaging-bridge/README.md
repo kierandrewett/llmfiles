@@ -122,8 +122,8 @@ Smoke test from the configured Discord control channel:
 ```
 
 Slash commands do not need Discord's Message Content privileged intent. Enable Message Content only if you want `!oc ...`
-prefix commands or plain-text guild replies, then set `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in the private
-runtime env.
+prefix commands or plain-text guild replies, then set `OPENCODE_BRIDGE_DISCORD_MESSAGE_CONTENT_INTENT=1` in your local
+environment or `compose.local.yaml`.
 
 ## Telegram setup
 
@@ -194,6 +194,8 @@ Expected result:
 - If `OPENCODE_BRIDGE_TELEGRAM_CREATE_TOPICS=1`, `/oc new` creates a Telegram topic first and binds the session to that
   topic. Existing topic commands keep binding to the topic they were sent from.
 - `/oc prompt` sends text to the bound OpenCode session.
+- If voice transcription is enabled, a voice or audio message in the bound chat is transcribed and sent to that same
+  OpenCode session.
 - `/oc schedule every 30m ...` creates a durable scheduled prompt for the session that is active in this chat.
 - `/oc jobs`, `/oc run-now <job-id>`, and `/oc unschedule <job-id>` inspect, run, and remove scheduled prompts for this chat.
 - When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
@@ -284,6 +286,8 @@ Expected result:
 - `/oc status` reports OpenCode health and the active Discord channel session.
 - `/oc new` creates and binds a session to that Discord channel.
 - `/oc prompt` sends text to the bound OpenCode session.
+- If voice transcription is enabled, an audio attachment in the bound channel is transcribed and sent to that same
+  OpenCode session.
 - `/oc schedule every 30m ...` creates a durable scheduled prompt for the session that is active in this channel.
 - `/oc jobs`, `/oc run-now <job-id>`, and `/oc unschedule <job-id>` inspect, run, and remove scheduled prompts for this channel.
 - When OpenCode emits a permission prompt for the bound session, the bridge posts the permission ID and the reply commands:
@@ -345,6 +349,43 @@ export OPENCODE_BRIDGE_DISCORD_APPLICATION_ID="123456789012345678" # needed for 
 export OPENCODE_BRIDGE_DISCORD_GUILD_ID="123456789012345678"       # optional, but useful while testing
 export OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS="1"
 ```
+
+## Voice transcription
+
+Voice transcription is disabled by default. When enabled, the bridge accepts Telegram voice/audio messages and Discord
+audio attachments from allowlisted users, transcribes the audio through OpenRouter, and sends the resulting text as a
+normal prompt to the active OpenCode session for that chat, topic, or channel.
+
+Enable it only in an untracked runtime environment or in `compose.local.yaml`:
+
+```bash
+export OPENCODE_BRIDGE_VOICE_TRANSCRIPTION="1"
+export OPENCODE_BRIDGE_OPENROUTER_API_KEY="replace-with-real-openrouter-key"
+```
+
+Optional settings:
+
+```bash
+export OPENCODE_BRIDGE_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+export OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_MODEL="openai/whisper-1"
+export OPENCODE_BRIDGE_OPENROUTER_TRANSCRIPTION_LANGUAGE="en" # optional ISO-639-1 hint
+export OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES="20971520"
+```
+
+The bridge calls OpenRouter's `POST /audio/transcriptions` endpoint with JSON containing `model`, base64 `input_audio`,
+the detected audio `format`, and the optional `language` hint. OpenRouter documents that endpoint here:
+https://openrouter.ai/docs/api/api-reference/transcriptions/create-audio-transcriptions.
+
+Operational rules:
+
+- `OPENCODE_BRIDGE_OPENROUTER_API_KEY` is required only when `OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=1`.
+- OpenRouter keys are read from env/config only. They are not written to the bridge state file.
+- Audio is accepted only after the normal Telegram or Discord allowlist check and only when the surface has an active
+  OpenCode session.
+- Discord attachment downloads must use HTTPS. Telegram downloads go through the Bot API `getFile` path.
+- Supported formats are `wav`, `mp3`, `flac`, `m4a`, `ogg`, `webm`, and `aac`.
+- The default maximum audio size is 20 MiB. Lower it with `OPENCODE_BRIDGE_VOICE_MAX_AUDIO_BYTES` if you want a smaller
+  cost and latency ceiling.
 
 ## Commands
 
@@ -424,19 +465,6 @@ docker build --build-arg OPENCODE_VERSION="1.0.180" -t opencode-messaging-bridge
 
 Docker Compose is the preferred server path for the Telegram or Discord bridge.
 
-Fast path if you just want one file to edit:
-
-```bash
-just opencode-bridge-config
-cp compose.example.yaml compose.local.yaml
-$EDITOR compose.local.yaml
-docker compose -f compose.local.yaml up -d --build
-docker compose -f compose.local.yaml logs -f opencode-bridge
-```
-
-`compose.local.yaml` is ignored by git. The example defaults to `telegram+discord`; change the command if you only want
-one surface. Put the real Discord or Telegram token values there if you use this path.
-
 Build a Docker-safe OpenCode config directory first. This copies your OpenCode config with symlinks resolved, so the
 container does not need a `llmfiles` mount:
 
@@ -444,70 +472,56 @@ container does not need a `llmfiles` mount:
 just opencode-bridge-config
 ```
 
-Copy the Compose interpolation example and edit the host paths:
+Copy the one-file example and edit the placeholders:
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+cp compose.example.yaml compose.local.yaml
+$EDITOR compose.local.yaml
 ```
 
-Create the private runtime env file referenced by `.env`:
+`compose.local.yaml` is ignored by git. The example defaults to `telegram+discord`; change the command if you only want
+one surface:
 
-```bash
-mkdir -p "$HOME/.config/opencode-messaging-bridge"
-cp bridge.env.example "$HOME/.config/opencode-messaging-bridge/env"
-$EDITOR "$HOME/.config/opencode-messaging-bridge/env"
-```
-
-Set `OPENCODE_BRIDGE_COMMAND` in `.env` to the surface you want the container to run:
-
-```bash
-OPENCODE_BRIDGE_COMMAND=telegram
+```yaml
+command: ["yarn", "start", "discord"]
 # or
-OPENCODE_BRIDGE_COMMAND=discord
+command: ["yarn", "start", "telegram"]
 # or
-OPENCODE_BRIDGE_COMMAND=telegram+discord
+command: ["yarn", "start", "telegram+discord"]
 ```
 
-In the runtime env file, remove the token block for any surface you are not running. Keep both token blocks when
-`OPENCODE_BRIDGE_COMMAND=telegram+discord`. The example shows both blocks so the available keys are visible, not because
-both are always required.
+In `compose.local.yaml`:
 
-For `bsociety`, set this in `.env`:
-
-```bash
-OPENCODE_BRIDGE_PROJECT_DIR=/home/kieran/dev/bsociety
-OPENCODE_BRIDGE_CONFIG_DIR=/home/kieran/.config/opencode-messaging-bridge/opencode-config
-```
-
-Check the Compose shape with the example env before using real tokens:
-
-```bash
-OPENCODE_BRIDGE_RUNTIME_ENV_FILE=./bridge.env.example docker compose --env-file .env.example config
-```
-
-Do not run `docker compose config` against the real runtime env unless you are happy for bot tokens to appear in your
-terminal scrollback.
+- replace the Telegram and Discord token/id placeholders for the surfaces you run
+- remove or blank the unused platform block if you only run one surface
+- replace the host project mount, keeping `/workspace/project` as the container path
+- keep OpenCode auth mounted from `~/.local/share/opencode`, or replace that mount with a private Docker volume if you do
+  not want token refresh writing to the host auth directory
+- leave voice transcription disabled, or set `OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=1` and add the OpenRouter key only in
+  `compose.local.yaml`
 
 Start the bridge:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f opencode-bridge
-```
-
-You can also override the command for one Compose invocation without editing `.env`:
-
-```bash
-OPENCODE_BRIDGE_COMMAND=discord docker compose up -d --build
+docker compose -f compose.local.yaml up -d --build
+docker compose -f compose.local.yaml logs -f opencode-bridge
 ```
 
 Stop or restart it:
 
 ```bash
-docker compose restart opencode-bridge
-docker compose down
+docker compose -f compose.local.yaml restart opencode-bridge
+docker compose -f compose.local.yaml down
 ```
+
+Check the example shape before using real tokens:
+
+```bash
+docker compose -f compose.example.yaml config
+```
+
+Do not run `docker compose config` against `compose.local.yaml` unless you are happy for bot tokens or OpenRouter keys to
+appear in your terminal scrollback.
 
 The Compose file deliberately does not publish port `4096`. OpenCode stays on `127.0.0.1` inside the container.
 
@@ -532,7 +546,10 @@ OPENCODE_BRIDGE_DISCORD_REGISTER_SLASH_COMMANDS=1
 OPENCODE_BRIDGE_MANAGE_OPENCODE=1
 OPENCODE_BRIDGE_OPENCODE_HOST=127.0.0.1
 OPENCODE_BRIDGE_OPENCODE_PORT=4096
+OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=0
 ```
+
+If you enable voice transcription, add `OPENCODE_BRIDGE_OPENROUTER_API_KEY` to the same untracked env file.
 
 Run the container with secrets, OpenCode credentials, the target project, and bridge state mounted at runtime:
 
