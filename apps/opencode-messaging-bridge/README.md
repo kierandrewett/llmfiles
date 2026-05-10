@@ -135,7 +135,7 @@ export OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN="123456789:replace-with-real-token"
 curl -s "https://api.telegram.org/bot${OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN}/getUpdates"
 ```
 
-Use those values in the bridge runtime env file:
+Use those values in your local environment or `compose.local.yaml`:
 
 ```bash
 OPENCODE_BRIDGE_TELEGRAM_BOT_TOKEN=123456789:replace-with-real-token

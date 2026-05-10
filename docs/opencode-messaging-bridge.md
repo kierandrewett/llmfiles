@@ -15,7 +15,8 @@ The bridge should run as its own daemon and treat OpenCode, Telegram, and Discor
 - Let a messaging platform attach to an existing manually-created OpenCode session.
 - Relay OpenCode assistant text, reasoning parts exposed by OpenCode, important tool events, permission requests, and errors back to the mapped platform surface.
 - Let an allowlisted user schedule repeated prompts against an explicitly bound OpenCode session.
-- Let an allowlisted user send an audio prompt through opt-in voice transcription without storing the transcription provider key in bridge state.
+- Let an allowlisted user send an audio prompt through opt-in voice transcription without storing the transcription
+  provider key in bridge state.
 - Keep platform-specific state durable across daemon restarts.
 - Avoid storing secrets in state or git.
 - Avoid relying on Discord creating a large number of threads.
@@ -26,7 +27,8 @@ The bridge should run as its own daemon and treat OpenCode, Telegram, and Discor
 - No multi-user authorisation model beyond allowlists.
 - No public bot mode.
 - No hosted web dashboard.
-- No always-on microphone, live voice agent, or automatic audio capture. Voice input is an explicit inbound message or attachment.
+- No always-on microphone, live voice agent, or automatic audio capture. Voice input is an explicit inbound message or
+  attachment.
 - No automatic migration of every existing Discord thread binding until the core daemon works.
 - No Telegram webhook first. Long polling is simpler for a local daemon and avoids needing an HTTPS endpoint.
 - No dependence on Discord forum threads for session identity. Threads can remain an optional explicit binding, not the default session model.
@@ -402,6 +404,7 @@ This avoids the bridge guessing and accidentally sending a prompt to the wrong r
 | Telegram polling fails | Keep last committed offset, back off, retry. Do not advance offset until the update has been processed or safely rejected. |
 | Discord Gateway disconnects | Resume when possible using persisted session ID, resume URL, and sequence. Re-identify only when resume is not valid. |
 | Platform send is rate-limited | Persist retryable delivery, sleep for platform-provided retry time where available, retry with a bounded policy. |
+| Voice transcription fails | Report the transcription error to the originating surface and do not send a prompt to OpenCode. |
 | Bridge process restarts | Reload state, recheck OpenCode health, resubscribe to events, list sessions, backfill recent messages for bound sessions if needed. |
 | Permission request arrives while platform offline | Persist pending permission in state or recover with OpenCode permission list on reconnect. |
 | Duplicate platform update | Detect by Telegram update offset or Discord message ID plus platform surface. Ignore if already processed. |
@@ -548,8 +551,8 @@ Verification:
 ## Next steps
 
 Phase 1, Telegram control, Discord control, managed process supervision, event relay, permission replies, scheduled prompt
-automation, and Docker Compose packaging now live in `llmfiles/apps/opencode-messaging-bridge/`. The next implementation
-step is to smoke test the real runtimes and decide the voice path:
+automation, opt-in OpenRouter voice transcription, and Docker Compose packaging now live in
+`llmfiles/apps/opencode-messaging-bridge/`. The next implementation step is to smoke test the real runtimes:
 
 - smoke test the continuous `discord` command against the private Discord control channel, once with an external
   `opencode serve` and once through Docker Compose with `OPENCODE_BRIDGE_COMMAND=discord`
@@ -559,6 +562,7 @@ step is to smoke test the real runtimes and decide the voice path:
   project workdir mount, and a private bridge env file
 - decide whether reasoning parts should be sent by default or gated behind a config flag
 - smoke test `/oc schedule`, `/oc jobs`, `/oc run-now`, and `/oc unschedule` from Telegram and Discord
-- choose an opt-in voice transcription hook without storing provider secrets in bridge state
+- smoke test Telegram voice messages and Discord audio attachments with `OPENCODE_BRIDGE_VOICE_TRANSCRIPTION=1` and an
+  untracked OpenRouter key
 
 The dedicated-repo option can stay deferred until the daemon has Telegram and Discord parity. Keeping the first implementation in `llmfiles` is still the smallest reversible step.
